@@ -1,7 +1,5 @@
 from typing import List, Tuple
 
-import matplotlib.pyplot as plt
-import pandas as pd
 import streamlit as st
 
 from planner import (
@@ -10,7 +8,7 @@ from planner import (
     LayoutPlan,
     describe_board,
     default_templates,
-    draw_geometry,
+    render_geometry_svg,
 )
 
 
@@ -43,14 +41,43 @@ def _board_controls() -> BoardSpecification:
         polygon = [(0.0, 0.0), (long_leg, 0.0), (long_leg, width), (width, width), (width, short_leg), (0.0, short_leg)]
         return BoardSpecification(shape="l-shape", width=long_leg, height=short_leg, polygon=polygon)
 
-    st.sidebar.markdown("Enter the corner points of your board outline in millimetres.")
-    default_points: List[Tuple[float, float]] = [(0.0, 0.0), (2400.0, 0.0), (2400.0, 1200.0), (0.0, 1200.0)]
-    data = st.sidebar.data_editor(
-        pd.DataFrame(default_points, columns=["x", "y"]),
-        num_rows="dynamic",
-        key="custom_polygon",
+    st.sidebar.markdown(
+        "Enter the corner points of your board outline in millimetres. "
+        "Provide one point per line in the format `x,y`."
     )
-    polygon = list(data.itertuples(index=False, name=None))
+    default_points: List[Tuple[float, float]] = [
+        (0.0, 0.0),
+        (2400.0, 0.0),
+        (2400.0, 1200.0),
+        (0.0, 1200.0),
+    ]
+    default_text = "\n".join(f"{x:.0f},{y:.0f}" for x, y in default_points)
+    polygon_text = st.sidebar.text_area(
+        "Corner points",
+        value=default_text,
+        key="custom_polygon",
+        height=120,
+    )
+    polygon: List[Tuple[float, float]] = []
+    invalid_lines = 0
+    for line in polygon_text.splitlines():
+        if not line.strip():
+            continue
+        parts = line.split(",")
+        if len(parts) != 2:
+            invalid_lines += 1
+            continue
+        try:
+            x_val = float(parts[0].strip())
+            y_val = float(parts[1].strip())
+        except ValueError:
+            invalid_lines += 1
+            continue
+        polygon.append((x_val, y_val))
+    if invalid_lines:
+        st.sidebar.warning(
+            f"Skipped {invalid_lines} line{'s' if invalid_lines != 1 else ''} with invalid coordinates."
+        )
     return BoardSpecification(
         shape="custom",
         width=max(p[0] for p in polygon) if polygon else 0.0,
@@ -89,9 +116,10 @@ def _render_plan(plan: LayoutPlan, board: BoardSpecification) -> None:
     total_length = plan.total_length_mm() / 1000
     straight_length = plan.straight_length_mm() / 1000
     curve_length = plan.curve_length_mm() / 1000
-    breakdown = pd.DataFrame(
-        plan.piece_breakdown(), columns=["Catalogue", "Piece", "Quantity"]
-    )
+    breakdown_rows = [
+        {"Catalogue": code, "Piece": name, "Quantity": count}
+        for code, name, count in plan.piece_breakdown()
+    ]
 
     col1, col2 = st.columns([1, 1])
     with col1:
@@ -105,34 +133,13 @@ def _render_plan(plan: LayoutPlan, board: BoardSpecification) -> None:
             st.markdown("**Notes:**")
             for note in plan.notes:
                 st.markdown(f"- {note}")
-        st.dataframe(breakdown, hide_index=True, use_container_width=True)
+        st.dataframe(breakdown_rows, hide_index=True, use_container_width=True)
 
     with col2:
         geometry = plan.build_geometry()
         width, height = board.bounding_box()
-        fig, ax = plt.subplots(figsize=(6, 4))
-        draw_geometry(geometry, ax)
-        half_width = width / 2
-        half_height = height / 2
-        ax.add_patch(
-            plt.Rectangle(
-                (-half_width, -half_height),
-                width,
-                height,
-                fill=False,
-                edgecolor="#555555",
-                linestyle=":",
-                linewidth=1.5,
-            )
-        )
-        ax.set_aspect("equal", adjustable="box")
-        ax.set_title("Track geometry preview")
-        ax.set_xlabel("mm")
-        ax.set_ylabel("mm")
-        ax.grid(True, linestyle=":", linewidth=0.5)
-        ax.set_xlim(-half_width - 200, half_width + 200)
-        ax.set_ylim(-half_height - 200, half_height + 200)
-        st.pyplot(fig, clear_figure=True)
+        svg = render_geometry_svg(geometry, width, height)
+        st.markdown(svg, unsafe_allow_html=True)
 
 
 board = _board_controls()
