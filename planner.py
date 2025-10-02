@@ -6,9 +6,6 @@ from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set, Tupl
 
 import math
 
-import matplotlib.pyplot as plt
-import numpy as np
-
 
 @dataclass(frozen=True)
 class TrackPiece:
@@ -130,45 +127,167 @@ class BoardSpecification:
         return self.width, self.height
 
 
-def _oval_points(radius: float, straight_total: float, offset: Tuple[float, float] = (0.0, 0.0), samples: int = 120) -> np.ndarray:
-    """Create a closed oval represented as (x, y) points."""
-    ox, oy = offset
+def _linspace(start: float, end: float, steps: int) -> List[float]:
+    if steps <= 1:
+        return [start]
+    delta = (end - start) / (steps - 1)
+    return [start + i * delta for i in range(steps)]
+
+
+def _oval_points(
+    radius: float,
+    straight_total: float,
+    offset: Tuple[float, float] = (0.0, 0.0),
+    samples: int = 120,
+) -> List[Tuple[float, float]]:
+    """Create a closed oval represented as (x, y) coordinate pairs."""
+
+    quarter = max(2, samples // 4)
     half_straight = straight_total / 2.0
-    top = np.column_stack(
-        [np.linspace(half_straight, -half_straight, samples // 4), np.full(samples // 4, radius)]
-    )
-    bottom = np.column_stack(
-        [np.linspace(-half_straight, half_straight, samples // 4), np.full(samples // 4, -radius)]
-    )
-    theta_left = np.linspace(math.pi / 2, 3 * math.pi / 2, samples // 4)
-    left = np.column_stack(
-        [-half_straight + radius * np.cos(theta_left), radius * np.sin(theta_left)]
-    )
-    theta_right = np.linspace(-math.pi / 2, math.pi / 2, samples // 4)
-    right = np.column_stack(
-        [half_straight + radius * np.cos(theta_right), radius * np.sin(theta_right)]
-    )
-    points = np.vstack([top, left, bottom, right, top[:1]])
-    points[:, 0] += ox
-    points[:, 1] += oy
+    ox, oy = offset
+
+    points: List[Tuple[float, float]] = []
+
+    # Top straight (right to left for continuity)
+    for x in _linspace(half_straight, -half_straight, quarter):
+        points.append((ox + x, oy + radius))
+
+    # Left arc (90° to 270°)
+    for theta in _linspace(math.pi / 2, 3 * math.pi / 2, quarter):
+        x = -half_straight + radius * math.cos(theta)
+        y = radius * math.sin(theta)
+        points.append((ox + x, oy + y))
+
+    # Bottom straight (left to right)
+    for x in _linspace(-half_straight, half_straight, quarter):
+        points.append((ox + x, oy - radius))
+
+    # Right arc (-90° to 90°)
+    for theta in _linspace(-math.pi / 2, math.pi / 2, quarter):
+        x = half_straight + radius * math.cos(theta)
+        y = radius * math.sin(theta)
+        points.append((ox + x, oy + y))
+
+    if points:
+        points.append(points[0])
     return points
 
 
-def draw_geometry(commands: Sequence[GeometryCommand], ax: plt.Axes) -> None:
+def render_geometry_svg(
+    commands: Sequence[GeometryCommand],
+    board_width: float,
+    board_height: float,
+) -> str:
+    """Render layout geometry to an SVG snippet suitable for embedding in Streamlit."""
+
+    if not commands:
+        return (
+            "<div style=\"border:1px solid #e6e6e6;padding:0.5rem;background-color:#fafafa;\">"
+            "<p><em>No track preview available for this layout.</em></p>"
+            "</div>"
+        )
+
+    track_shapes: List[Tuple[str, List[Tuple[float, float]]]] = []
+    line_shapes: List[Tuple[str, Tuple[float, float, float, float]]] = []
+    markers: List[Tuple[float, float]] = []
+
+    min_x = float("inf")
+    max_x = float("-inf")
+    min_y = float("inf")
+    max_y = float("-inf")
+
+    def include_point(x: float, y: float) -> None:
+        nonlocal min_x, max_x, min_y, max_y
+        min_x = min(min_x, x)
+        max_x = max(max_x, x)
+        min_y = min(min_y, y)
+        max_y = max(max_y, y)
+
+    if board_width > 0 and board_height > 0:
+        half_w = board_width / 2.0
+        half_h = board_height / 2.0
+        include_point(-half_w, -half_h)
+        include_point(half_w, half_h)
+
     for command in commands:
         if command.command == "oval":
             radius, straight_total, ox, oy = command.parameters
             pts = _oval_points(radius, straight_total, (ox, oy))
-            ax.plot(pts[:, 0], pts[:, 1], color="#1f77b4", linewidth=2)
-        elif command.command == "line":
+            for x, y in pts:
+                include_point(x, y)
+            track_shapes.append(("oval", pts))
+        elif command.command in {"line", "siding"}:
             x1, y1, x2, y2 = command.parameters
-            ax.plot([x1, x2], [y1, y2], color="#1f77b4", linewidth=2)
-        elif command.command == "siding":
-            x1, y1, x2, y2 = command.parameters
-            ax.plot([x1, x2], [y1, y2], color="#ff7f0e", linewidth=2, linestyle="--")
+            include_point(x1, y1)
+            include_point(x2, y2)
+            line_shapes.append((command.command, (x1, y1, x2, y2)))
         elif command.command == "marker":
             x, y = command.parameters
-            ax.scatter([x], [y], s=20, color="#2ca02c")
+            include_point(x, y)
+            markers.append((x, y))
+
+    if min_x == float("inf"):
+        min_x, max_x = -500.0, 500.0
+        min_y, max_y = -500.0, 500.0
+
+    margin = 150.0
+    min_x -= margin
+    max_x += margin
+    min_y -= margin
+    max_y += margin
+
+    span_x = max(max_x - min_x, 1.0)
+    span_y = max(max_y - min_y, 1.0)
+
+    def to_svg_point(x: float, y: float) -> Tuple[float, float]:
+        return x - min_x, max_y - y
+
+    parts: List[str] = []
+    parts.append(
+        "<div style=\"border:1px solid #e6e6e6;padding:0.5rem;background-color:#fafafa;\">"
+    )
+    parts.append(
+        f'<svg viewBox="0 0 {span_x:.1f} {span_y:.1f}" '
+        "preserveAspectRatio=\"xMidYMid meet\" style=\"width:100%;height:auto;\">"
+    )
+
+    if board_width > 0 and board_height > 0:
+        half_w = board_width / 2.0
+        half_h = board_height / 2.0
+        top_left = to_svg_point(-half_w, half_h)
+        parts.append(
+            f'<rect x="{top_left[0]:.1f}" y="{top_left[1]:.1f}" '
+            f'width="{board_width:.1f}" height="{board_height:.1f}" '
+            'fill="none" stroke="#555555" stroke-dasharray="6 6" stroke-width="2" />'
+        )
+
+    for _, pts in track_shapes:
+        svg_points = " ".join(
+            f"{to_svg_point(x, y)[0]:.1f},{to_svg_point(x, y)[1]:.1f}" for x, y in pts
+        )
+        parts.append(
+            f'<polyline points="{svg_points}" fill="none" stroke="#1f77b4" stroke-width="4" />'
+        )
+
+    for kind, (x1, y1, x2, y2) in line_shapes:
+        sx1, sy1 = to_svg_point(x1, y1)
+        sx2, sy2 = to_svg_point(x2, y2)
+        dash = ' stroke-dasharray="10 6"' if kind == "siding" else ""
+        colour = "#ff7f0e" if kind == "siding" else "#1f77b4"
+        parts.append(
+            f'<line x1="{sx1:.1f}" y1="{sy1:.1f}" x2="{sx2:.1f}" y2="{sy2:.1f}" '
+            f'stroke="{colour}" stroke-width="4"{dash} />'
+        )
+
+    for x, y in markers:
+        sx, sy = to_svg_point(x, y)
+        parts.append(
+            f'<circle cx="{sx:.1f}" cy="{sy:.1f}" r="6" fill="#2ca02c" />'
+        )
+
+    parts.append("</svg>")
+    parts.append("</div>")
+    return "".join(parts)
 
 
 class LayoutGenerator:
