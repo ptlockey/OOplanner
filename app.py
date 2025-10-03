@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from string import Template
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import streamlit as st
 import streamlit.components.v1 as components
@@ -23,6 +23,67 @@ st.write(
     "Define the board you are building, drag track from the library, rotate or flip pieces,"
     " and snap them together while the planner keeps an eye on inventory and total run length."""
 )
+
+
+def _normalise_layout_payload(data: object) -> Tuple[List[Dict[str, object]], Optional[float]]:
+    """Extract placements and optional zoom from a parsed JSON payload."""
+
+    placements_payload: object
+    zoom_value: Optional[float] = None
+    if isinstance(data, dict):
+        placements_payload = data.get("placements")
+        zoom_raw = data.get("zoom")
+        if isinstance(zoom_raw, (int, float)):
+            zoom_value = float(zoom_raw)
+    else:
+        placements_payload = data
+
+    if not isinstance(placements_payload, list):
+        raise ValueError("Layout JSON must contain a list of placements.")
+
+    normalised: List[Dict[str, object]] = []
+    saw_item = False
+    for idx, raw_item in enumerate(placements_payload):
+        saw_item = True
+        if not isinstance(raw_item, dict):
+            continue
+        code = raw_item.get("code")
+        if not isinstance(code, str) or not code:
+            continue
+        placement_id = raw_item.get("id")
+        if not isinstance(placement_id, str) or not placement_id:
+            placement_id = f"placement-{idx}"
+
+        def _to_float(value: object, default: float = 0.0) -> float:
+            if isinstance(value, (int, float)):
+                return float(value)
+            if isinstance(value, str):
+                try:
+                    return float(value)
+                except ValueError:
+                    return default
+            return default
+
+        x_val = _to_float(raw_item.get("x"), 0.0)
+        y_val = _to_float(raw_item.get("y"), 0.0)
+        rotation_val = _to_float(raw_item.get("rotation"), 0.0)
+        flipped_val = bool(raw_item.get("flipped", False))
+
+        normalised.append(
+            {
+                "id": placement_id,
+                "code": code,
+                "x": x_val,
+                "y": y_val,
+                "rotation": rotation_val,
+                "flipped": flipped_val,
+            }
+        )
+
+    if saw_item and not normalised:
+        raise ValueError("No valid placements were found in the layout JSON.")
+
+    return normalised, zoom_value
 
 
 def _board_controls() -> BoardSpecification:
@@ -252,6 +313,24 @@ def _designer(
         font-size: 0.85rem;
         color: #555555;
     }
+    .export-controls {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0.5rem;
+    }
+    .export-controls button {
+        padding: 0.45rem 0.9rem;
+        border-radius: 0.4rem;
+        border: 1px solid #1f77b4;
+        background: #1f77b4;
+        color: #ffffff;
+        cursor: pointer;
+        font-weight: 600;
+    }
+    .export-controls .hint {
+        margin: 0;
+    }
     </style>
     <div class="designer-wrapper">
         <div class="track-library">
@@ -282,6 +361,10 @@ def _designer(
                 <button id="deletePiece">🗑 Remove</button>
             </div>
             <p class="hint">Tip: drag pieces directly on the board. Use "Snap to piece" to connect endpoints, or toggle section move to reposition an entire connected run.</p>
+            <div class="export-controls">
+                <button id="saveLayout" type="button">💾 Save layout</button>
+                <p class="hint">Download a JSON backup of the current plan.</p>
+            </div>
         </div>
     </div>
     <script>
@@ -741,6 +824,7 @@ def _designer(
             type: "streamlit:setComponentValue",
             value: JSON.stringify(payload),
         }, "*");
+        return payload;
     }
 
     function requestFrameHeight() {
@@ -1048,6 +1132,24 @@ def _designer(
         emitState();
     });
 
+    const saveLayoutButton = document.getElementById('saveLayout');
+    if (saveLayoutButton) {
+        saveLayoutButton.addEventListener('click', () => {
+            const payload = emitState();
+            const jsonText = JSON.stringify(payload, null, 2);
+            const blob = new Blob([jsonText], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = url;
+            const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+            link.download = `layout-$${timestamp}.json`;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            setTimeout(() => URL.revokeObjectURL(url), 1000);
+        });
+    }
+
     window.addEventListener('resize', resizeCanvas);
     resizeCanvas();
     updateSelectionLabel();
@@ -1097,11 +1199,42 @@ if "placements" not in st.session_state:
 if "zoom" not in st.session_state:
     st.session_state["zoom"] = 1.0
 
+uploaded_layout = st.sidebar.file_uploader("Load layout JSON", type=["json"])
+if uploaded_layout is not None:
+    try:
+        raw_text = uploaded_layout.getvalue().decode("utf-8")
+        parsed_payload = json.loads(raw_text)
+        loaded_placements, loaded_zoom = _normalise_layout_payload(parsed_payload)
+    except UnicodeDecodeError:
+        st.sidebar.error("Could not decode the uploaded file. Please upload UTF-8 JSON.")
+    except (json.JSONDecodeError, ValueError) as exc:
+        st.sidebar.error(f"Unable to load layout: {exc}")
+    else:
+        st.session_state["placements"] = loaded_placements
+        if loaded_zoom is not None:
+            st.session_state["zoom"] = loaded_zoom
+        st.sidebar.success(f"Loaded {len(loaded_placements)} placement{'s' if len(loaded_placements) != 1 else ''} from layout.")
+
 placements: List[Dict[str, object]] = st.session_state["placements"]
 current_zoom: float = float(st.session_state.get("zoom", 1.0))
 placements, current_zoom = _designer(board, placements, current_zoom)
 st.session_state["placements"] = placements
 st.session_state["zoom"] = current_zoom
+
+layout_payload = {
+    "placements": placements,
+    "board": {
+        "description": describe_board(board),
+        "polygon": board.polygon_points(),
+    },
+    "zoom": current_zoom,
+}
+st.sidebar.download_button(
+    "Download layout JSON",
+    data=json.dumps(layout_payload, indent=2),
+    file_name="layout.json",
+    mime="application/json",
+)
 
 
 library = hornby_track_library()
