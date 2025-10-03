@@ -154,3 +154,49 @@ def describe_board(board: BoardSpecification) -> str:
     if board.shape == "custom":
         return f"Custom board bounding box {dims}"
     return dims
+
+
+def layout_resistance_ohms(
+    track_length_mm: float,
+    rail_resistivity_ohm_m: float = 6.2e-7,
+    rail_cross_section_mm2: float = 1.5,
+) -> float:
+    """Estimate the end-to-end resistance of the rails for a given layout length.
+
+    The calculation assumes nickel-silver rail (``6.2×10⁻⁷ Ω·m``) with an
+    effective cross-sectional area of ``1.5 mm²`` per rail. Current flows out on
+    one rail and returns on the other, so the path length is twice the physical
+    layout length.
+    """
+
+    if track_length_mm <= 0 or rail_cross_section_mm2 <= 0 or rail_resistivity_ohm_m <= 0:
+        return 0.0
+    effective_length_m = (track_length_mm / 1000.0) * 2.0
+    cross_section_m2 = rail_cross_section_mm2 * 1e-6
+    resistance = rail_resistivity_ohm_m * effective_length_m / cross_section_m2
+    return float(resistance)
+
+
+def estimate_layout_power(
+    track_length_mm: float,
+    supply_voltage: float = 16.0,
+    expected_current_draw: float = 1.5,
+    rail_resistivity_ohm_m: float = 6.2e-7,
+    rail_cross_section_mm2: float = 1.5,
+) -> float:
+    """Estimate the power a booster must deliver for the supplied layout.
+
+    The total is calculated as the sum of the ideal load power (voltage times
+    current) and the resistive losses in the rails for the given length.
+    """
+
+    if supply_voltage <= 0 or expected_current_draw <= 0:
+        return 0.0
+    resistance = layout_resistance_ohms(
+        track_length_mm,
+        rail_resistivity_ohm_m=rail_resistivity_ohm_m,
+        rail_cross_section_mm2=rail_cross_section_mm2,
+    )
+    rail_loss = (expected_current_draw ** 2) * resistance
+    load_power = supply_voltage * expected_current_draw
+    return float(load_power + rail_loss)

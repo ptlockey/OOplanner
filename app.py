@@ -12,6 +12,8 @@ from planner import (
     describe_board,
     hornby_track_library,
     inventory_from_placements,
+    layout_resistance_ohms,
+    estimate_layout_power,
     total_run_length_mm,
 )
 
@@ -1193,6 +1195,22 @@ def _designer(
 board = _board_controls()
 st.sidebar.success(describe_board(board))
 
+st.sidebar.header("Power planning")
+supply_voltage = st.sidebar.number_input(
+    "DCC supply voltage (V)",
+    min_value=10.0,
+    max_value=22.0,
+    value=16.0,
+    step=0.5,
+)
+expected_current = st.sidebar.number_input(
+    "Expected simultaneous load (A)",
+    min_value=0.1,
+    max_value=5.0,
+    value=1.5,
+    step=0.1,
+)
+
 if "placements" not in st.session_state:
     st.session_state["placements"] = []
 
@@ -1240,12 +1258,36 @@ st.sidebar.download_button(
 library = hornby_track_library()
 inventory = inventory_from_placements(placements)
 total_length_mm = total_run_length_mm(placements)
+total_length_m = total_length_mm / 1000.0
+track_resistance = layout_resistance_ohms(total_length_mm)
+estimated_power = estimate_layout_power(
+    total_length_mm,
+    supply_voltage=supply_voltage,
+    expected_current_draw=expected_current,
+)
+rail_loss = (expected_current ** 2) * track_resistance
 
 st.subheader("Inventory summary")
-cols = st.columns(3)
+cols = st.columns(4)
 cols[0].metric("Pieces placed", sum(inventory.values()))
 cols[1].metric("Unique catalogue items", len(inventory))
-cols[2].metric("Run length", f"{total_length_mm/1000:.2f} m")
+cols[2].metric("Run length", f"{total_length_m:.2f} m")
+cols[3].metric("Rail resistance", f"{track_resistance:.2f} Ω")
+
+st.subheader("Power estimate")
+power_cols = st.columns(2)
+power_cols[0].metric("Estimated booster power", f"{estimated_power:.1f} W")
+power_cols[1].metric("Rail losses", f"{rail_loss:.1f} W")
+st.caption(
+    "Assumes nickel-silver rail, uniform cross-section and a simultaneous load of "
+    f"{expected_current:.1f} A at {supply_voltage:.1f} V."
+)
+
+if total_length_m > 30:
+    st.warning(
+        "The track run exceeds 30 m. DCC power will dissipate over this distance; "
+        "consider adding power districts or additional feeders."
+    )
 
 if inventory:
     rows = []
