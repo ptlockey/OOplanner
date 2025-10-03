@@ -1,270 +1,4 @@
-from __future__ import annotations
 
-import json
-from pathlib import Path
-from string import Template
-from typing import Dict, List, Optional, Tuple
-
-import streamlit as st
-import streamlit.components.v1 as components
-
-from planner import (
-    BoardSpecification,
-    describe_board,
-    hornby_track_library,
-    inventory_from_placements,
-    layout_resistance_ohms,
-    estimate_layout_power,
-    total_run_length_mm,
-)
-
-
-_COMPONENT_DIR = Path(__file__).parent / "_layout_designer_component"
-_COMPONENT_DIR.mkdir(exist_ok=True)
-_COMPONENT_INDEX = _COMPONENT_DIR / "index.html"
-_layout_designer_component = components.declare_component(
-    "layout_designer",
-    path=str(_COMPONENT_DIR),
-)
-
-
-st.set_page_config(page_title="Hornby OO Layout Planner", layout="wide")
-st.title("Hornby OO Gauge Layout Planner")
-st.write(
-    """Lay out your own Hornby OO gauge plan directly on the baseboard outline.\n"
-    "Define the board you are building, drag track from the library, rotate or flip pieces,"
-    " and snap them together while the planner keeps an eye on inventory and total run length."""
-)
-
-
-def _normalise_layout_payload(
-    data: object,
-) -> Tuple[List[Dict[str, object]], List[Dict[str, object]], Optional[float]]:
-    """Extract placements, planning circles and optional zoom from payload."""
-
-    placements_payload: object
-    circles_payload: object = []
-    zoom_value: Optional[float] = None
-    if isinstance(data, dict):
-        placements_payload = data.get("placements")
-        circles_payload = data.get("circles")
-        zoom_raw = data.get("zoom")
-        if isinstance(zoom_raw, (int, float)):
-            zoom_value = float(zoom_raw)
-    else:
-        placements_payload = data
-
-    if not isinstance(placements_payload, list):
-        raise ValueError("Layout JSON must contain a list of placements.")
-
-    def _to_float(value: object, default: float = 0.0) -> float:
-        if isinstance(value, (int, float)):
-            return float(value)
-        if isinstance(value, str):
-            try:
-                return float(value)
-            except ValueError:
-                return default
-        return default
-
-    normalised: List[Dict[str, object]] = []
-    saw_item = False
-    for idx, raw_item in enumerate(placements_payload):
-        saw_item = True
-        if not isinstance(raw_item, dict):
-            continue
-        code = raw_item.get("code")
-        if not isinstance(code, str) or not code:
-            continue
-        placement_id = raw_item.get("id")
-        if not isinstance(placement_id, str) or not placement_id:
-            placement_id = f"placement-{idx}"
-
-        x_val = _to_float(raw_item.get("x"), 0.0)
-        y_val = _to_float(raw_item.get("y"), 0.0)
-        rotation_val = _to_float(raw_item.get("rotation"), 0.0)
-        flipped_val = bool(raw_item.get("flipped", False))
-
-        normalised.append(
-            {
-                "id": placement_id,
-                "code": code,
-                "x": x_val,
-                "y": y_val,
-                "rotation": rotation_val,
-                "flipped": flipped_val,
-            }
-        )
-
-    if saw_item and not normalised:
-        raise ValueError("No valid placements were found in the layout JSON.")
-
-    circles: List[Dict[str, object]] = []
-    if isinstance(circles_payload, list):
-        for idx, raw_circle in enumerate(circles_payload):
-            if not isinstance(raw_circle, dict):
-                continue
-            circle_id = raw_circle.get("id")
-            if not isinstance(circle_id, str) or not circle_id:
-                circle_id = f"circle-{idx}"
-            radius = _to_float(raw_circle.get("radius"), 0.0)
-            if radius <= 0:
-                continue
-            x_val = _to_float(raw_circle.get("x"), 0.0)
-            y_val = _to_float(raw_circle.get("y"), 0.0)
-            color_val = raw_circle.get("color")
-            label_val = raw_circle.get("label")
-            circle: Dict[str, object] = {
-                "id": circle_id,
-                "radius": radius,
-                "x": x_val,
-                "y": y_val,
-            }
-            if isinstance(color_val, str) and color_val:
-                circle["color"] = color_val
-            if isinstance(label_val, str) and label_val:
-                circle["label"] = label_val
-            circles.append(circle)
-
-    return normalised, circles, zoom_value
-
-
-def _board_controls() -> BoardSpecification:
-    st.sidebar.header("Board outline")
-    shape = st.sidebar.selectbox(
-        "Board shape",
-        ["Rectangle", "L-Shape", "Custom polygon"],
-        index=0,
-    )
-
-    if shape == "Rectangle":
-        width = st.sidebar.number_input("Width (mm)", min_value=600.0, value=1800.0, step=50.0)
-        height = st.sidebar.number_input("Depth (mm)", min_value=450.0, value=1200.0, step=50.0)
-        polygon = [
-            (0.0, 0.0),
-            (width, 0.0),
-            (width, height),
-            (0.0, height),
-        ]
-        return BoardSpecification(shape="rectangle", width=width, height=height, polygon=polygon)
-
-    if shape == "L-Shape":
-        long_leg = st.sidebar.number_input("Long leg length (mm)", min_value=1000.0, value=2400.0, step=50.0)
-        short_leg = st.sidebar.number_input("Short leg length (mm)", min_value=800.0, value=1500.0, step=50.0)
-        shelf_width = st.sidebar.number_input("Shelf width (mm)", min_value=450.0, value=900.0, step=25.0)
-        polygon = [
-            (0.0, 0.0),
-            (long_leg, 0.0),
-            (long_leg, shelf_width),
-            (shelf_width, shelf_width),
-            (shelf_width, short_leg),
-            (0.0, short_leg),
-        ]
-        return BoardSpecification(
-            shape="l-shape",
-            width=long_leg,
-            height=short_leg,
-            polygon=polygon,
-        )
-
-    st.sidebar.markdown(
-        "Enter the corner points of your board outline in millimetres. "
-        "Provide one point per line in the format `x,y`."
-    )
-    default_points: List[Tuple[float, float]] = [
-        (0.0, 0.0),
-        (2400.0, 0.0),
-        (2400.0, 1200.0),
-        (0.0, 1200.0),
-    ]
-    default_text = "\n".join(f"{x:.0f},{y:.0f}" for x, y in default_points)
-    polygon_text = st.sidebar.text_area(
-        "Corner points",
-        value=default_text,
-        key="custom_polygon",
-        height=160,
-    )
-    polygon: List[Tuple[float, float]] = []
-    invalid_lines = 0
-    for line in polygon_text.splitlines():
-        if not line.strip():
-            continue
-        parts = line.split(",")
-        if len(parts) != 2:
-            invalid_lines += 1
-            continue
-        try:
-            x_val = float(parts[0].strip())
-            y_val = float(parts[1].strip())
-        except ValueError:
-            invalid_lines += 1
-            continue
-        polygon.append((x_val, y_val))
-    if invalid_lines:
-        st.sidebar.warning(
-            f"Skipped {invalid_lines} line{'s' if invalid_lines != 1 else ''} with invalid coordinates."
-        )
-    width = max((p[0] for p in polygon), default=0.0)
-    height = max((p[1] for p in polygon), default=0.0)
-    return BoardSpecification(shape="custom", width=width, height=height, polygon=polygon)
-
-
-def _designer(
-    board: BoardSpecification,
-    placements: List[Dict[str, object]],
-    circles: List[Dict[str, object]],
-    initial_zoom: float,
-) -> Tuple[List[Dict[str, object]], List[Dict[str, object]], float]:
-    library = hornby_track_library()
-    board_polygon = board.polygon_points()
-    min_zoom = 0.4
-    max_zoom = 3.0
-    try:
-        initial_zoom_value = float(initial_zoom)
-    except (TypeError, ValueError):
-        initial_zoom_value = 1.0
-    clamped_initial_zoom = max(min(initial_zoom_value, max_zoom), min_zoom)
-    current_zoom = clamped_initial_zoom
-    board_payload = {
-        "polygon": board_polygon,
-        "description": describe_board(board),
-    }
-    track_payload = [
-        {
-            "code": piece.code,
-            "name": piece.name,
-            "kind": piece.kind,
-            "length": piece.length,
-            "angle": piece.angle,
-            "radius": piece.radius,
-            "displayLength": piece.arc_length() if piece.kind == "curve" else piece.length,
-        }
-        for piece in library.values()
-    ]
-
-    library_cards = []
-    for item in track_payload:
-        extra_controls = ""
-        if item["kind"] == "curve" and item.get("radius"):
-            extra_controls = (
-                f"<button data-radius=\"{item['radius']}\" data-label=\"{item['code']} ({item['radius']:.0f} mm)\" "
-                "class=\"add-circle\">Add guide circle</button>"
-            )
-        radius_fragment = f" · Radius {item['radius']:.0f} mm" if item.get("radius") else ""
-        card = (
-            "<div class=\"library-item\">"
-            f"<div class=\"library-heading\"><strong>{item['code']}</strong><span>{item['name']}</span></div>"
-            f"<small>{item['kind'].title()} · {item['displayLength']:.0f} mm{radius_fragment}</small>"
-            f"<div class=\"library-actions\">"
-            f"<button data-code=\"{item['code']}\" class=\"add-piece\">Add to board</button>"
-            f"{extra_controls}"
-            "</div>"
-            "</div>"
-        )
-        library_cards.append(card)
-
-    html_template = Template(
-        """
     <style>
     .designer-wrapper {
         display: grid;
@@ -524,7 +258,7 @@ def _designer(
         <aside class="library-panel">
             <h3>Track library and curve guides</h3>
             <p class="hint">Click "Add to board" to drop a piece. Curved pieces also offer a planning circle that you can drag on the board.</p>
-            <div class="library-grid">$library_cards</div>
+            <div class="library-grid"><div class="library-item"><div class="library-heading"><strong>R600</strong><span>Standard Straight</span></div><small>Straight · 168 mm</small><div class="library-actions"><button data-code="R600" class="add-piece">Add to board</button></div></div><div class="library-item"><div class="library-heading"><strong>R601</strong><span>Double Straight</span></div><small>Straight · 336 mm</small><div class="library-actions"><button data-code="R601" class="add-piece">Add to board</button></div></div><div class="library-item"><div class="library-heading"><strong>R602</strong><span>Short Straight</span></div><small>Straight · 111 mm</small><div class="library-actions"><button data-code="R602" class="add-piece">Add to board</button></div></div><div class="library-item"><div class="library-heading"><strong>R603</strong><span>Half Straight</span></div><small>Straight · 67 mm</small><div class="library-actions"><button data-code="R603" class="add-piece">Add to board</button></div></div><div class="library-item"><div class="library-heading"><strong>R604</strong><span>Quarter Straight</span></div><small>Straight · 41 mm</small><div class="library-actions"><button data-code="R604" class="add-piece">Add to board</button></div></div><div class="library-item"><div class="library-heading"><strong>R618</strong><span>Buffer Stop Track</span></div><small>Special · 76 mm</small><div class="library-actions"><button data-code="R618" class="add-piece">Add to board</button></div></div><div class="library-item"><div class="library-heading"><strong>R627</strong><span>Level Crossing Straight</span></div><small>Special · 168 mm</small><div class="library-actions"><button data-code="R627" class="add-piece">Add to board</button></div></div><div class="library-item"><div class="library-heading"><strong>R6102</strong><span>Flexi Track (914mm)</span></div><small>Flex · 914 mm</small><div class="library-actions"><button data-code="R6102" class="add-piece">Add to board</button></div></div><div class="library-item"><div class="library-heading"><strong>R6143</strong><span>Platform Straight</span></div><small>Special · 168 mm</small><div class="library-actions"><button data-code="R6143" class="add-piece">Add to board</button></div></div><div class="library-item"><div class="library-heading"><strong>R605</strong><span>1st Radius Curve (90°)</span></div><small>Curve · 583 mm · Radius 371 mm</small><div class="library-actions"><button data-code="R605" class="add-piece">Add to board</button><button data-radius="371.0" data-label="R605 (371 mm)" class="add-circle">Add guide circle</button></div></div><div class="library-item"><div class="library-heading"><strong>R606</strong><span>1st Radius Curve (45°)</span></div><small>Curve · 291 mm · Radius 371 mm</small><div class="library-actions"><button data-code="R606" class="add-piece">Add to board</button><button data-radius="371.0" data-label="R606 (371 mm)" class="add-circle">Add guide circle</button></div></div><div class="library-item"><div class="library-heading"><strong>R607</strong><span>2nd Radius Curve (45°)</span></div><small>Curve · 344 mm · Radius 438 mm</small><div class="library-actions"><button data-code="R607" class="add-piece">Add to board</button><button data-radius="438.0" data-label="R607 (438 mm)" class="add-circle">Add guide circle</button></div></div><div class="library-item"><div class="library-heading"><strong>R608</strong><span>3rd Radius Curve (45°)</span></div><small>Curve · 397 mm · Radius 505 mm</small><div class="library-actions"><button data-code="R608" class="add-piece">Add to board</button><button data-radius="505.0" data-label="R608 (505 mm)" class="add-circle">Add guide circle</button></div></div><div class="library-item"><div class="library-heading"><strong>R609</strong><span>4th Radius Curve (45°)</span></div><small>Curve · 449 mm · Radius 572 mm</small><div class="library-actions"><button data-code="R609" class="add-piece">Add to board</button><button data-radius="572.0" data-label="R609 (572 mm)" class="add-circle">Add guide circle</button></div></div><div class="library-item"><div class="library-heading"><strong>R610</strong><span>1st Radius Curve (22.5°)</span></div><small>Curve · 146 mm · Radius 371 mm</small><div class="library-actions"><button data-code="R610" class="add-piece">Add to board</button><button data-radius="371.0" data-label="R610 (371 mm)" class="add-circle">Add guide circle</button></div></div><div class="library-item"><div class="library-heading"><strong>R611</strong><span>2nd Radius Curve (22.5°)</span></div><small>Curve · 172 mm · Radius 438 mm</small><div class="library-actions"><button data-code="R611" class="add-piece">Add to board</button><button data-radius="438.0" data-label="R611 (438 mm)" class="add-circle">Add guide circle</button></div></div><div class="library-item"><div class="library-heading"><strong>R612</strong><span>3rd Radius Curve (22.5°)</span></div><small>Curve · 198 mm · Radius 505 mm</small><div class="library-actions"><button data-code="R612" class="add-piece">Add to board</button><button data-radius="505.0" data-label="R612 (505 mm)" class="add-circle">Add guide circle</button></div></div><div class="library-item"><div class="library-heading"><strong>R613</strong><span>4th Radius Curve (22.5°)</span></div><small>Curve · 225 mm · Radius 572 mm</small><div class="library-actions"><button data-code="R613" class="add-piece">Add to board</button><button data-radius="572.0" data-label="R613 (572 mm)" class="add-circle">Add guide circle</button></div></div><div class="library-item"><div class="library-heading"><strong>R8072</strong><span>Left-hand Point</span></div><small>Point · 168 mm</small><div class="library-actions"><button data-code="R8072" class="add-piece">Add to board</button></div></div><div class="library-item"><div class="library-heading"><strong>R8073</strong><span>Right-hand Point</span></div><small>Point · 168 mm</small><div class="library-actions"><button data-code="R8073" class="add-piece">Add to board</button></div></div><div class="library-item"><div class="library-heading"><strong>R8074</strong><span>Y Point</span></div><small>Point · 168 mm</small><div class="library-actions"><button data-code="R8074" class="add-piece">Add to board</button></div></div><div class="library-item"><div class="library-heading"><strong>R8075</strong><span>Curved Point LH</span></div><small>Point · 168 mm · Radius 371 mm</small><div class="library-actions"><button data-code="R8075" class="add-piece">Add to board</button></div></div><div class="library-item"><div class="library-heading"><strong>R8076</strong><span>Curved Point RH</span></div><small>Point · 168 mm · Radius 371 mm</small><div class="library-actions"><button data-code="R8076" class="add-piece">Add to board</button></div></div><div class="library-item"><div class="library-heading"><strong>R8099</strong><span>Double Slip</span></div><small>Special · 168 mm</small><div class="library-actions"><button data-code="R8099" class="add-piece">Add to board</button></div></div><div class="library-item"><div class="library-heading"><strong>R614</strong><span>90° Crossing</span></div><small>Special · 168 mm</small><div class="library-actions"><button data-code="R614" class="add-piece">Add to board</button></div></div><div class="library-item"><div class="library-heading"><strong>R615</strong><span>30° Crossing</span></div><small>Special · 168 mm</small><div class="library-actions"><button data-code="R615" class="add-piece">Add to board</button></div></div><div class="library-item"><div class="library-heading"><strong>R628</strong><span>Diamond Crossing</span></div><small>Special · 168 mm</small><div class="library-actions"><button data-code="R628" class="add-piece">Add to board</button></div></div></div>
             <div class="circle-panel">
                 <h4>Planning circles</h4>
                 <p class="hint">Drag circles on the canvas to position them. Use them to visualise curve radii and loops.</p>
@@ -534,11 +268,11 @@ def _designer(
     </div>
     <script src="https://unpkg.com/streamlit-component-lib/dist/index.js"></script>
     <script>
-    const boardData = $board_json;
-    const trackLibrary = $track_json;
-    const initialPlacements = $placements_json;
-    const initialCircles = $circles_json;
-    const initialZoom = $initial_zoom_json;
+    const boardData = {"polygon": [[0.0, 0.0], [1800.0, 0.0], [1800.0, 1200.0], [0.0, 1200.0]], "description": "Rectangular board 1.80 m x 1.20 m"};
+    const trackLibrary = [{"code": "R600", "name": "Standard Straight", "kind": "straight", "length": 168.0, "angle": null, "radius": null, "displayLength": 168.0}, {"code": "R601", "name": "Double Straight", "kind": "straight", "length": 335.5, "angle": null, "radius": null, "displayLength": 335.5}, {"code": "R602", "name": "Short Straight", "kind": "straight", "length": 111.0, "angle": null, "radius": null, "displayLength": 111.0}, {"code": "R603", "name": "Half Straight", "kind": "straight", "length": 67.0, "angle": null, "radius": null, "displayLength": 67.0}, {"code": "R604", "name": "Quarter Straight", "kind": "straight", "length": 41.0, "angle": null, "radius": null, "displayLength": 41.0}, {"code": "R618", "name": "Buffer Stop Track", "kind": "special", "length": 76.0, "angle": null, "radius": null, "displayLength": 76.0}, {"code": "R627", "name": "Level Crossing Straight", "kind": "special", "length": 168.0, "angle": null, "radius": null, "displayLength": 168.0}, {"code": "R6102", "name": "Flexi Track (914mm)", "kind": "flex", "length": 914.0, "angle": null, "radius": null, "displayLength": 914.0}, {"code": "R6143", "name": "Platform Straight", "kind": "special", "length": 168.0, "angle": null, "radius": null, "displayLength": 168.0}, {"code": "R605", "name": "1st Radius Curve (90\u00b0)", "kind": "curve", "length": 0.0, "angle": 90.0, "radius": 371.0, "displayLength": 582.7654372409066}, {"code": "R606", "name": "1st Radius Curve (45\u00b0)", "kind": "curve", "length": 0.0, "angle": 45.0, "radius": 371.0, "displayLength": 291.3827186204533}, {"code": "R607", "name": "2nd Radius Curve (45\u00b0)", "kind": "curve", "length": 0.0, "angle": 45.0, "radius": 438.0, "displayLength": 344.0043955680824}, {"code": "R608", "name": "3rd Radius Curve (45\u00b0)", "kind": "curve", "length": 0.0, "angle": 45.0, "radius": 505.0, "displayLength": 396.62607251571137}, {"code": "R609", "name": "4th Radius Curve (45\u00b0)", "kind": "curve", "length": 0.0, "angle": 45.0, "radius": 572.0, "displayLength": 449.2477494633404}, {"code": "R610", "name": "1st Radius Curve (22.5\u00b0)", "kind": "curve", "length": 0.0, "angle": 22.5, "radius": 371.0, "displayLength": 145.69135931022666}, {"code": "R611", "name": "2nd Radius Curve (22.5\u00b0)", "kind": "curve", "length": 0.0, "angle": 22.5, "radius": 438.0, "displayLength": 172.0021977840412}, {"code": "R612", "name": "3rd Radius Curve (22.5\u00b0)", "kind": "curve", "length": 0.0, "angle": 22.5, "radius": 505.0, "displayLength": 198.31303625785569}, {"code": "R613", "name": "4th Radius Curve (22.5\u00b0)", "kind": "curve", "length": 0.0, "angle": 22.5, "radius": 572.0, "displayLength": 224.6238747316702}, {"code": "R8072", "name": "Left-hand Point", "kind": "point", "length": 168.0, "angle": null, "radius": null, "displayLength": 168.0}, {"code": "R8073", "name": "Right-hand Point", "kind": "point", "length": 168.0, "angle": null, "radius": null, "displayLength": 168.0}, {"code": "R8074", "name": "Y Point", "kind": "point", "length": 168.0, "angle": null, "radius": null, "displayLength": 168.0}, {"code": "R8075", "name": "Curved Point LH", "kind": "point", "length": 168.0, "angle": 22.5, "radius": 371.0, "displayLength": 168.0}, {"code": "R8076", "name": "Curved Point RH", "kind": "point", "length": 168.0, "angle": 22.5, "radius": 371.0, "displayLength": 168.0}, {"code": "R8099", "name": "Double Slip", "kind": "special", "length": 168.0, "angle": null, "radius": null, "displayLength": 168.0}, {"code": "R614", "name": "90\u00b0 Crossing", "kind": "special", "length": 168.0, "angle": null, "radius": null, "displayLength": 168.0}, {"code": "R615", "name": "30\u00b0 Crossing", "kind": "special", "length": 168.0, "angle": null, "radius": null, "displayLength": 168.0}, {"code": "R628", "name": "Diamond Crossing", "kind": "special", "length": 168.0, "angle": null, "radius": null, "displayLength": 168.0}];
+    const initialPlacements = [];
+    const initialCircles = [];
+    const initialZoom = 1.0;
     const libraryByCode = Object.fromEntries(trackLibrary.map(item => [item.code, item]));
     const placements = initialPlacements.map((item, idx) => ({
         id: item.id || ('placement-' + idx),
@@ -623,7 +357,7 @@ def _designer(
             x,
             y,
             color: typeof circle.color === 'string' && circle.color ? circle.color : colorPalette[nextCircleColor++ % colorPalette.length],
-            label: typeof circle.label === 'string' && circle.label ? circle.label : `Radius $${radius.toFixed(0)} mm`,
+            label: typeof circle.label === 'string' && circle.label ? circle.label : `Radius ${radius.toFixed(0)} mm`,
         };
     }).filter(Boolean);
     let circleCounter = guideCircles.length;
@@ -1132,7 +866,7 @@ def _designer(
             return;
         }
         if (circle) {
-            label.textContent = circle.label || `Guide circle · $${circle.radius.toFixed(0)} mm`;
+            label.textContent = circle.label || `Guide circle · ${circle.radius.toFixed(0)} mm`;
             return;
         }
         label.textContent = 'No piece selected';
@@ -1149,7 +883,7 @@ def _designer(
         button.addEventListener('click', event => {
             const radius = parseFloat(event.currentTarget.getAttribute('data-radius'));
             if (!Number.isFinite(radius) || radius <= 0) { return; }
-            const label = event.currentTarget.getAttribute('data-label') || `Radius $${radius.toFixed(0)} mm`;
+            const label = event.currentTarget.getAttribute('data-label') || `Radius ${radius.toFixed(0)} mm`;
             const newCircle = {
                 id: 'circle-' + (circleCounter++),
                 radius,
@@ -1488,18 +1222,18 @@ def _designer(
         }
         const entries = guideCircles.map(circle => {
             const selected = circle.id === selectedCircleId ? ' selected' : '';
-            const label = circle.label || `Radius $${circle.radius.toFixed(0)} mm`;
-            const position = `Centre $${circle.x.toFixed(0)} mm · $${circle.y.toFixed(0)} mm`;
+            const label = circle.label || `Radius ${circle.radius.toFixed(0)} mm`;
+            const position = `Centre ${circle.x.toFixed(0)} mm · ${circle.y.toFixed(0)} mm`;
             const colour = circle.color || '#ff7f0e';
             return `
-                <div class="circle-item$${selected}" data-id="$${circle.id}">
-                    <span class="circle-swatch" style="background:$${colour}"></span>
+                <div class="circle-item${selected}" data-id="${circle.id}">
+                    <span class="circle-swatch" style="background:${colour}"></span>
                     <div class="circle-meta">
-                        <div><strong>$${label}</strong></div>
-                        <div>$${position}</div>
+                        <div><strong>${label}</strong></div>
+                        <div>${position}</div>
                     </div>
                     <div class="circle-actions">
-                        <button type="button" data-action="remove" data-id="$${circle.id}">Remove</button>
+                        <button type="button" data-action="remove" data-id="${circle.id}">Remove</button>
                     </div>
                 </div>
             `;
@@ -1547,7 +1281,7 @@ def _designer(
             const link = document.createElement('a');
             link.href = url;
             const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-            link.download = `layout-$${timestamp}.json`;
+            link.download = `layout-${timestamp}.json`;
             document.body.appendChild(link);
             link.click();
             document.body.removeChild(link);
@@ -1566,168 +1300,4 @@ def _designer(
     requestFrameHeight();
     announceReady();
     </script>
-    """
-    )
-
-    html = html_template.substitute(
-        library_cards="".join(library_cards),
-        board_json=json.dumps(board_payload),
-        track_json=json.dumps(track_payload),
-        placements_json=json.dumps(placements),
-        circles_json=json.dumps(circles),
-        initial_zoom_json=json.dumps(clamped_initial_zoom),
-    )
-
-    _COMPONENT_INDEX.write_text(html, encoding="utf-8")
-    component_value = _layout_designer_component(
-        key="layout-designer",
-        default=None,
-        data_version=str(hash(html)),
-    )
-    if component_value is None:
-        return placements, circles, current_zoom
-
-    if not isinstance(component_value, str):
-        return placements, circles, current_zoom
-
-    try:
-        parsed = json.loads(component_value)
-    except json.JSONDecodeError:
-        return placements, circles, current_zoom
-
-    if not isinstance(parsed, dict):
-        return placements, circles, current_zoom
-
-    payload = parsed.get("placements")
-    zoom_value = parsed.get("zoom")
-    circles_payload = parsed.get("circles")
-    if isinstance(zoom_value, (int, float)):
-        current_zoom = max(min(float(zoom_value), max_zoom), min_zoom)
-    updated = placements
-    if isinstance(payload, list):
-        updated = [p for p in payload if isinstance(p, dict)]
-    updated_circles = circles
-    if isinstance(circles_payload, list):
-        updated_circles = [c for c in circles_payload if isinstance(c, dict)]
-    return updated, updated_circles, current_zoom
-
-
-board = _board_controls()
-st.sidebar.success(describe_board(board))
-
-st.sidebar.header("Power planning")
-supply_voltage = st.sidebar.number_input(
-    "DCC supply voltage (V)",
-    min_value=10.0,
-    max_value=22.0,
-    value=16.0,
-    step=0.5,
-)
-expected_current = st.sidebar.number_input(
-    "Expected simultaneous load (A)",
-    min_value=0.1,
-    max_value=5.0,
-    value=1.5,
-    step=0.1,
-)
-
-if "placements" not in st.session_state:
-    st.session_state["placements"] = []
-
-if "zoom" not in st.session_state:
-    st.session_state["zoom"] = 1.0
-
-if "circles" not in st.session_state:
-    st.session_state["circles"] = []
-
-uploaded_layout = st.sidebar.file_uploader("Load layout JSON", type=["json"])
-if uploaded_layout is not None:
-    try:
-        raw_text = uploaded_layout.getvalue().decode("utf-8")
-        parsed_payload = json.loads(raw_text)
-        loaded_placements, loaded_circles, loaded_zoom = _normalise_layout_payload(parsed_payload)
-    except UnicodeDecodeError:
-        st.sidebar.error("Could not decode the uploaded file. Please upload UTF-8 JSON.")
-    except (json.JSONDecodeError, ValueError) as exc:
-        st.sidebar.error(f"Unable to load layout: {exc}")
-    else:
-        st.session_state["placements"] = loaded_placements
-        st.session_state["circles"] = loaded_circles
-        if loaded_zoom is not None:
-            st.session_state["zoom"] = loaded_zoom
-        st.sidebar.success(f"Loaded {len(loaded_placements)} placement{'s' if len(loaded_placements) != 1 else ''} from layout.")
-
-placements: List[Dict[str, object]] = st.session_state["placements"]
-circles: List[Dict[str, object]] = st.session_state.get("circles", [])
-current_zoom: float = float(st.session_state.get("zoom", 1.0))
-placements, circles, current_zoom = _designer(board, placements, circles, current_zoom)
-st.session_state["placements"] = placements
-st.session_state["circles"] = circles
-st.session_state["zoom"] = current_zoom
-
-layout_payload = {
-    "placements": placements,
-    "circles": circles,
-    "board": {
-        "description": describe_board(board),
-        "polygon": board.polygon_points(),
-    },
-    "zoom": current_zoom,
-}
-st.sidebar.download_button(
-    "Download layout JSON",
-    data=json.dumps(layout_payload, indent=2),
-    file_name="layout.json",
-    mime="application/json",
-)
-
-
-library = hornby_track_library()
-inventory = inventory_from_placements(placements)
-total_length_mm = total_run_length_mm(placements)
-total_length_m = total_length_mm / 1000.0
-track_resistance = layout_resistance_ohms(total_length_mm)
-estimated_power = estimate_layout_power(
-    total_length_mm,
-    supply_voltage=supply_voltage,
-    expected_current_draw=expected_current,
-)
-rail_loss = (expected_current ** 2) * track_resistance
-
-st.subheader("Inventory summary")
-cols = st.columns(4)
-cols[0].metric("Pieces placed", sum(inventory.values()))
-cols[1].metric("Unique catalogue items", len(inventory))
-cols[2].metric("Run length", f"{total_length_m:.2f} m")
-cols[3].metric("Rail resistance", f"{track_resistance:.2f} Ω")
-
-st.subheader("Power estimate")
-power_cols = st.columns(2)
-power_cols[0].metric("Estimated booster power", f"{estimated_power:.1f} W")
-power_cols[1].metric("Rail losses", f"{rail_loss:.1f} W")
-st.caption(
-    "Assumes nickel-silver rail, uniform cross-section and a simultaneous load of "
-    f"{expected_current:.1f} A at {supply_voltage:.1f} V."
-)
-
-if total_length_m > 30:
-    st.warning(
-        "The track run exceeds 30 m. DCC power will dissipate over this distance; "
-        "consider adding power districts or additional feeders."
-    )
-
-if inventory:
-    rows = []
-    for code, count in sorted(inventory.items()):
-        piece = library.get(code)
-        rows.append(
-            {
-                "Catalogue": code,
-                "Piece": piece.name if piece else "Unknown",
-                "Quantity": count,
-                "Length (mm)": f"{piece.arc_length():.0f}" if piece and piece.kind == "curve" else (f"{piece.length:.0f}" if piece else "-"),
-            }
-        )
-    st.dataframe(rows, hide_index=True, use_container_width=True)
-else:
-    st.info("Add pieces from the library to begin building your layout.")
+    
