@@ -327,8 +327,8 @@ def _designer(
     const heightMm = Math.max(maxY - minY, 1);
     const padding = 60;
     const SNAP_DISTANCE_MM = 200;
-    const CONNECTION_TOLERANCE_MM = 6;
-    const ANGLE_TOLERANCE_RAD = Math.PI / 12;
+    const CONNECTION_TOLERANCE_MM = 3;
+    const ANGLE_TOLERANCE_RAD = Math.PI / 36;
 
     function toRadians(degrees) {
         return (degrees || 0) * Math.PI / 180;
@@ -552,12 +552,16 @@ def _designer(
                     y: Math.cos(angleLocal) * orientation,
                 };
                 const tangentLocalAngle = Math.atan2(tangentVector.y, tangentVector.x);
+                const radialLocalAngle = Math.atan2(localPosition.y, localPosition.x);
                 return {
                     x: placement.x + rotated.x,
                     y: placement.y + rotated.y,
                     tangent: normalizeRadians(tangentLocalAngle + rotation),
+                    radial: normalizeRadians(radialLocalAngle + rotation),
+                    radialVector: rotated,
                     localPosition,
                     localTangent: tangentLocalAngle,
+                    localRadial: radialLocalAngle,
                 };
             });
         }
@@ -576,12 +580,16 @@ def _designer(
         ];
         return endpoints.map(endpoint => {
             const rotated = rotatePoint(endpoint.localPosition.x, endpoint.localPosition.y, rotation);
+            const radialLocalAngle = Math.atan2(endpoint.localPosition.y, endpoint.localPosition.x);
             return {
                 x: placement.x + rotated.x,
                 y: placement.y + rotated.y,
                 tangent: normalizeRadians(endpoint.localTangent + rotation),
+                radial: normalizeRadians(radialLocalAngle + rotation),
+                radialVector: rotated,
                 localPosition: endpoint.localPosition,
                 localTangent: endpoint.localTangent,
+                localRadial: radialLocalAngle,
             };
         });
     }
@@ -597,8 +605,16 @@ def _designer(
         if (distance > CONNECTION_TOLERANCE_MM) {
             return false;
         }
-        const angleDiff = Math.abs(normalizeRadians(endpointA.tangent - endpointB.tangent));
-        return Math.abs(angleDiff - Math.PI) < ANGLE_TOLERANCE_RAD;
+        const tangentDiff = Math.abs(normalizeRadians(endpointA.tangent - endpointB.tangent));
+        const radialA = endpointA.radial;
+        const radialB = endpointB.radial;
+        const radialDiff =
+            radialA === undefined || radialB === undefined
+                ? Number.POSITIVE_INFINITY
+                : Math.abs(normalizeRadians(radialA - radialB));
+        const tangentsOpposed = Math.abs(tangentDiff - Math.PI) < ANGLE_TOLERANCE_RAD;
+        const radialsAligned = radialDiff < ANGLE_TOLERANCE_RAD;
+        return tangentsOpposed || radialsAligned;
     }
 
     function connectedSectionIds(originId) {
@@ -662,28 +678,48 @@ def _designer(
                     const dy = endpoint.y - target.y;
                     const distance = Math.hypot(dx, dy);
                     if (distance > SNAP_DISTANCE_MM) { return; }
-                    const angleDiff = Math.abs(normalizeRadians(endpoint.tangent - target.tangent));
-                    if (Math.abs(angleDiff - Math.PI) >= ANGLE_TOLERANCE_RAD) { return; }
-                    if (best && distance >= best.distance) { return; }
-                    const desiredTangent = normalizeRadians(target.tangent + Math.PI);
-                    const deltaRotationRad = normalizeRadians(desiredTangent - endpoint.tangent);
-                    const deltaRotationDeg = normalizeDegrees(toDegrees(deltaRotationRad));
-                    const newRotationDeg = (placement.rotation + deltaRotationDeg + 360) % 360;
-                    const newRotationRad = toRadians(newRotationDeg);
-                    const rotatedLocal = rotatePoint(endpoint.localPosition.x, endpoint.localPosition.y, newRotationRad);
-                    const newCenterX = target.x - rotatedLocal.x;
-                    const newCenterY = target.y - rotatedLocal.y;
-                    const deltaX = newCenterX - placement.x;
-                    const deltaY = newCenterY - placement.y;
-                    best = {
-                        distance,
-                        deltaRotationDeg,
-                        deltaX,
-                        deltaY,
-                    };
+                    const candidateTangents = [
+                        normalizeRadians(target.tangent + Math.PI),
+                        normalizeRadians(target.tangent),
+                    ];
+                    candidateTangents.forEach(desiredTangent => {
+                        const deltaRotationRad = normalizeRadians(desiredTangent - endpoint.tangent);
+                        const deltaRotationDeg = normalizeDegrees(toDegrees(deltaRotationRad));
+                        const newRotationDeg = (placement.rotation + deltaRotationDeg + 360) % 360;
+                        const newRotationRad = toRadians(newRotationDeg);
+                        const rotatedLocal = rotatePoint(endpoint.localPosition.x, endpoint.localPosition.y, newRotationRad);
+                        const newCenterX = target.x - rotatedLocal.x;
+                        const newCenterY = target.y - rotatedLocal.y;
+                        const transformedEndpoint = {
+                            x: target.x,
+                            y: target.y,
+                            tangent: normalizeRadians(endpoint.localTangent + newRotationRad),
+                            radial: normalizeRadians(Math.atan2(rotatedLocal.y, rotatedLocal.x)),
+                        };
+                        if (!endpointsAreConnected(transformedEndpoint, target)) { return; }
+                        const deltaX = newCenterX - placement.x;
+                        const deltaY = newCenterY - placement.y;
+                        const rotationMagnitude = Math.abs(deltaRotationDeg);
+                        if (
+                            !best ||
+                            distance < best.distance - 1e-6 ||
+                            (Math.abs(distance - best.distance) < 1e-6 && rotationMagnitude < best.rotationMagnitude - 1e-6)
+                        ) {
+                            best = {
+                                distance,
+                                deltaRotationDeg,
+                                deltaX,
+                                deltaY,
+                                rotationMagnitude,
+                            };
+                        }
+                    });
                 });
             });
         });
+        if (best) {
+            delete best.rotationMagnitude;
+        }
         return best;
     }
 
