@@ -257,10 +257,16 @@ def _designer(
         """
     <style>
     .designer-wrapper {
+        display: grid;
+        grid-template-columns: minmax(0, 2.2fr) minmax(280px, 1fr);
+        gap: 1.25rem;
+        align-items: flex-start;
+        font-family: 'Source Sans Pro', sans-serif;
+    }
+    .board-column {
         display: flex;
         flex-direction: column;
         gap: 1rem;
-        font-family: 'Source Sans Pro', sans-serif;
     }
     .board-canvas {
         display: flex;
@@ -351,18 +357,22 @@ def _designer(
     .export-controls .hint {
         margin: 0;
     }
-    details.library-panel {
+    .library-panel {
         border: 1px solid #d0d0d0;
-        border-radius: 0.5rem;
+        border-radius: 0.75rem;
         background: #f8f9fb;
-        padding: 0.5rem 0.75rem 0.75rem;
+        padding: 1rem;
+        display: flex;
+        flex-direction: column;
+        gap: 0.75rem;
+        position: sticky;
+        top: 0;
+        max-height: calc(100vh - 140px);
+        overflow: auto;
     }
-    details.library-panel > summary {
-        cursor: pointer;
-        font-weight: 600;
-        font-size: 1.05rem;
-        margin-bottom: 0.5rem;
-        outline: none;
+    .library-panel h3 {
+        margin: 0;
+        font-size: 1.1rem;
     }
     .library-grid {
         display: grid;
@@ -457,40 +467,52 @@ def _designer(
         cursor: pointer;
         font-size: 0.8rem;
     }
+    @media (max-width: 1100px) {
+        .designer-wrapper {
+            display: flex;
+            flex-direction: column;
+        }
+        .library-panel {
+            position: static;
+            max-height: none;
+        }
+    }
     </style>
     <div class="designer-wrapper">
-        <div class="board-canvas">
-            <div class="board-surface">
-                <canvas id="boardCanvas"></canvas>
-            </div>
-            <div class="view-controls">
-                <label for="zoomSlider">Zoom</label>
-                <input type="range" id="zoomSlider" min="0.4" max="3" step="0.01" value="1" />
-                <span id="zoomValue">100%</span>
-                <button id="resetView" type="button">Reset view</button>
-            </div>
-            <div class="piece-controls">
-                <span id="selectionLabel">No piece selected</span>
-                <button id="rotateLeft">⟲ Rotate -15°</button>
-                <button id="rotateRight">⟳ Rotate +15°</button>
-                <button id="flipPiece">Flip</button>
-                <button id="nudgeUp">▲ Nudge</button>
-                <button id="nudgeDown">▼ Nudge</button>
-                <button id="nudgeLeft">◀ Nudge</button>
-                <button id="nudgeRight">▶ Nudge</button>
-                <button id="snapPiece" class="primary">Snap to piece</button>
-                <button id="snapGrid">Snap to 10 mm</button>
-                <button id="toggleSectionMode">Section move: Off</button>
-                <button id="deletePiece">🗑 Remove</button>
-            </div>
-            <p class="hint">Tip: drag pieces directly on the board. Use "Snap to piece" to connect endpoints, or toggle section move to reposition an entire connected run.</p>
-            <div class="export-controls">
-                <button id="saveLayout" type="button">💾 Save layout</button>
-                <p class="hint">Download a JSON backup of the current plan.</p>
+        <div class="board-column">
+            <div class="board-canvas">
+                <div class="board-surface">
+                    <canvas id="boardCanvas"></canvas>
+                </div>
+                <div class="view-controls">
+                    <label for="zoomSlider">Zoom</label>
+                    <input type="range" id="zoomSlider" min="0.4" max="3" step="0.01" value="1" />
+                    <span id="zoomValue">100%</span>
+                    <button id="resetView" type="button">Reset view</button>
+                </div>
+                <div class="piece-controls">
+                    <span id="selectionLabel">No piece selected</span>
+                    <button id="rotateLeft">⟲ Rotate -15°</button>
+                    <button id="rotateRight">⟳ Rotate +15°</button>
+                    <button id="flipPiece">Flip</button>
+                    <button id="nudgeUp">▲ Nudge</button>
+                    <button id="nudgeDown">▼ Nudge</button>
+                    <button id="nudgeLeft">◀ Nudge</button>
+                    <button id="nudgeRight">▶ Nudge</button>
+                    <button id="snapPiece" class="primary">Snap to piece</button>
+                    <button id="snapGrid">Snap to 10 mm</button>
+                    <button id="toggleSectionMode">Section move: Off</button>
+                    <button id="deletePiece">🗑 Remove</button>
+                </div>
+                <p class="hint">Tip: drag pieces directly on the board. Use "Snap to piece" to connect endpoints, or toggle section move to reposition an entire connected run.</p>
+                <div class="export-controls">
+                    <button id="saveLayout" type="button">💾 Save layout</button>
+                    <p class="hint">Download a JSON backup of the current plan.</p>
+                </div>
             </div>
         </div>
-        <details class="library-panel" open>
-            <summary>Track library and curve guides</summary>
+        <aside class="library-panel">
+            <h3>Track library and curve guides</h3>
             <p class="hint">Click "Add to board" to drop a piece. Curved pieces also offer a planning circle that you can drag on the board.</p>
             <div class="library-grid">$library_cards</div>
             <div class="circle-panel">
@@ -498,7 +520,7 @@ def _designer(
                 <p class="hint">Drag circles on the canvas to position them. Use them to visualise curve radii and loops.</p>
                 <div id="circleList" class="circle-list"></div>
             </div>
-        </details>
+        </aside>
     </div>
     <script>
     const boardData = $board_json;
@@ -518,6 +540,19 @@ def _designer(
     let nextId = placements.length;
     let selectedId = placements.length ? placements[placements.length - 1].id : null;
     const colorPalette = ['#ff7f0e', '#9467bd', '#2ca02c', '#d62728', '#17becf', '#1f77b4'];
+    const queryParams = new URLSearchParams(window.location.search);
+    const componentId = queryParams.get('componentId');
+
+    function postToStreamlit(type, payload = {}) {
+        const message = Object.assign({
+            isStreamlitMessage: true,
+            type,
+        }, payload);
+        if (componentId) {
+            message.componentId = componentId;
+        }
+        window.parent.postMessage(message, '*');
+    }
     let nextCircleColor = 0;
     let sectionMode = false;
     let activeSectionIds = null;
@@ -1008,11 +1043,9 @@ def _designer(
             board: boardData,
             zoom,
         };
-        window.parent.postMessage({
-            isStreamlitMessage: true,
-            type: "streamlit:setComponentValue",
+        postToStreamlit("streamlit:setComponentValue", {
             value: JSON.stringify(payload),
-        }, "*");
+        });
         return payload;
     }
 
@@ -1027,11 +1060,15 @@ def _designer(
     }
 
     function requestFrameHeight() {
-        window.parent.postMessage({
-            isStreamlitMessage: true,
-            type: "streamlit:setFrameHeight",
+        postToStreamlit("streamlit:setFrameHeight", {
             height: document.body.scrollHeight,
-        }, "*");
+        });
+    }
+
+    function announceReady() {
+        postToStreamlit("streamlit:componentReady", {
+            height: document.body.scrollHeight,
+        });
     }
 
     function addPiece(code) {
@@ -1487,12 +1524,16 @@ def _designer(
         });
     }
 
-    window.addEventListener('resize', resizeCanvas);
+    window.addEventListener('resize', () => {
+        resizeCanvas();
+        requestFrameHeight();
+    });
     resizeCanvas();
     updateSelectionLabel();
     updateSectionToggleButton();
     renderCircleList();
     requestFrameHeight();
+    announceReady();
     </script>
     """
     )
