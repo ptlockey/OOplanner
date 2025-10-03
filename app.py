@@ -1,45 +1,67 @@
-from typing import List, Tuple
+from __future__ import annotations
+
+import json
+from string import Template
+from typing import Dict, List, Tuple
 
 import streamlit as st
+import streamlit.components.v1 as components
 
 from planner import (
     BoardSpecification,
-    LayoutGenerator,
-    LayoutPlan,
     describe_board,
-    default_templates,
-    render_geometry_svg,
+    hornby_track_library,
+    inventory_from_placements,
+    total_run_length_mm,
 )
 
 
 st.set_page_config(page_title="Hornby OO Layout Planner", layout="wide")
 st.title("Hornby OO Gauge Layout Planner")
 st.write(
-    """Design OO gauge train set plans by choosing a baseboard size and the features you would like in your layout.\n"
-    "The planner uses real-world Hornby set-track dimensions to recommend track plans that fit within your available space."""
+    """Lay out your own Hornby OO gauge plan directly on the baseboard outline.\n"
+    "Define the board you are building, drag track from the library, rotate or flip pieces,"
+    " and snap them together while the planner keeps an eye on inventory and total run length."""
 )
 
 
-@st.cache_resource
-def get_generator() -> LayoutGenerator:
-    return LayoutGenerator(default_templates())
-
-
 def _board_controls() -> BoardSpecification:
-    st.sidebar.header("Board")
-    shape = st.sidebar.selectbox("Board shape", ["Rectangle", "L-Shape", "Custom polygon"], index=0)
+    st.sidebar.header("Board outline")
+    shape = st.sidebar.selectbox(
+        "Board shape",
+        ["Rectangle", "L-Shape", "Custom polygon"],
+        index=0,
+    )
 
     if shape == "Rectangle":
         width = st.sidebar.number_input("Width (mm)", min_value=600.0, value=1800.0, step=50.0)
         height = st.sidebar.number_input("Depth (mm)", min_value=450.0, value=1200.0, step=50.0)
-        return BoardSpecification(shape="rectangle", width=width, height=height)
+        polygon = [
+            (0.0, 0.0),
+            (width, 0.0),
+            (width, height),
+            (0.0, height),
+        ]
+        return BoardSpecification(shape="rectangle", width=width, height=height, polygon=polygon)
 
     if shape == "L-Shape":
         long_leg = st.sidebar.number_input("Long leg length (mm)", min_value=1000.0, value=2400.0, step=50.0)
         short_leg = st.sidebar.number_input("Short leg length (mm)", min_value=800.0, value=1500.0, step=50.0)
-        width = st.sidebar.number_input("Overall width (mm)", min_value=600.0, value=900.0, step=25.0)
-        polygon = [(0.0, 0.0), (long_leg, 0.0), (long_leg, width), (width, width), (width, short_leg), (0.0, short_leg)]
-        return BoardSpecification(shape="l-shape", width=long_leg, height=short_leg, polygon=polygon)
+        shelf_width = st.sidebar.number_input("Shelf width (mm)", min_value=450.0, value=900.0, step=25.0)
+        polygon = [
+            (0.0, 0.0),
+            (long_leg, 0.0),
+            (long_leg, shelf_width),
+            (shelf_width, shelf_width),
+            (shelf_width, short_leg),
+            (0.0, short_leg),
+        ]
+        return BoardSpecification(
+            shape="l-shape",
+            width=long_leg,
+            height=short_leg,
+            polygon=polygon,
+        )
 
     st.sidebar.markdown(
         "Enter the corner points of your board outline in millimetres. "
@@ -56,7 +78,7 @@ def _board_controls() -> BoardSpecification:
         "Corner points",
         value=default_text,
         key="custom_polygon",
-        height=120,
+        height=160,
     )
     polygon: List[Tuple[float, float]] = []
     invalid_lines = 0
@@ -78,88 +100,535 @@ def _board_controls() -> BoardSpecification:
         st.sidebar.warning(
             f"Skipped {invalid_lines} line{'s' if invalid_lines != 1 else ''} with invalid coordinates."
         )
-    return BoardSpecification(
-        shape="custom",
-        width=max(p[0] for p in polygon) if polygon else 0.0,
-        height=max(p[1] for p in polygon) if polygon else 0.0,
-        polygon=polygon,
-    )
+    width = max((p[0] for p in polygon), default=0.0)
+    height = max((p[1] for p in polygon), default=0.0)
+    return BoardSpecification(shape="custom", width=width, height=height, polygon=polygon)
 
 
-def _objective_controls() -> Tuple[List[str], List[float]]:
-    st.sidebar.header("Layout priorities")
-    objectives = st.sidebar.multiselect(
-        "Choose the goals that matter to you",
-        [
-            "Maximise track coverage",
-            "Maximise straight running",
-            "Include loops",
-            "Include spurs/sidings",
-            "Include fiddle yard",
-            "Minimise total track",
-            "Encourage complex operations",
-            "Prefer multiple loops",
-        ],
-        default=["Include loops"],
-    )
-
-    allowed_radii = st.sidebar.multiselect(
-        "Allowed curve radii",
-        options=[371.0, 438.0, 505.0, 572.0],
-        format_func=lambda v: f"{v:.0f} mm",
-        default=[371.0, 438.0, 505.0, 572.0],
-    )
-    return objectives, allowed_radii
-
-
-def _render_plan(plan: LayoutPlan, board: BoardSpecification) -> None:
-    total_length = plan.total_length_mm() / 1000
-    straight_length = plan.straight_length_mm() / 1000
-    curve_length = plan.curve_length_mm() / 1000
-    breakdown_rows = [
-        {"Catalogue": code, "Piece": name, "Quantity": count}
-        for code, name, count in plan.piece_breakdown()
+def _designer(board: BoardSpecification, placements: List[Dict[str, object]]) -> List[Dict[str, object]]:
+    library = hornby_track_library()
+    board_polygon = board.polygon_points()
+    board_payload = {
+        "polygon": board_polygon,
+        "description": describe_board(board),
+    }
+    track_payload = [
+        {
+            "code": piece.code,
+            "name": piece.name,
+            "kind": piece.kind,
+            "length": piece.length,
+            "angle": piece.angle,
+            "radius": piece.radius,
+            "displayLength": piece.arc_length() if piece.kind == "curve" else piece.length,
+        }
+        for piece in library.values()
     ]
 
-    col1, col2 = st.columns([1, 1])
-    with col1:
-        st.subheader(plan.name)
-        st.write(plan.description)
-        st.metric("Total track length", f"{total_length:.2f} m")
-        st.metric("Straight sections", f"{straight_length:.2f} m")
-        st.metric("Curved sections", f"{curve_length:.2f} m")
-        st.write("**Features:** " + ", ".join(sorted(plan.features)))
-        if plan.notes:
-            st.markdown("**Notes:**")
-            for note in plan.notes:
-                st.markdown(f"- {note}")
-        st.dataframe(breakdown_rows, hide_index=True, use_container_width=True)
+    library_cards = []
+    for item in track_payload:
+        card = (
+            "<div class=\"library-item\">"
+            f"<strong>{item['code']}</strong><br/>"
+            f"<span>{item['name']}</span><br/>"
+            f"<small>{item['kind'].title()} · {item['displayLength']:.0f} mm</small>"
+            f"<button data-code=\"{item['code']}\" class=\"add-piece\">Add to board</button>"
+            "</div>"
+        )
+        library_cards.append(card)
 
-    with col2:
-        geometry = plan.build_geometry()
-        width, height = board.bounding_box()
-        svg = render_geometry_svg(geometry, width, height)
-        st.markdown(svg, unsafe_allow_html=True)
+    html_template = Template(
+        """
+    <style>
+    .designer-wrapper {
+        display: flex;
+        gap: 1rem;
+        font-family: 'Source Sans Pro', sans-serif;
+    }
+    .track-library {
+        width: 260px;
+        max-height: 640px;
+        overflow-y: auto;
+        border: 1px solid #d0d0d0;
+        border-radius: 0.5rem;
+        padding: 0.75rem;
+        background: #f8f9fb;
+    }
+    .track-library h3 {
+        margin-top: 0;
+        font-size: 1.1rem;
+    }
+    .library-item {
+        border: 1px solid #d7d7d7;
+        border-radius: 0.4rem;
+        padding: 0.5rem;
+        margin-bottom: 0.5rem;
+        background: #ffffff;
+    }
+    .library-item button {
+        margin-top: 0.4rem;
+        width: 100%;
+        padding: 0.35rem 0.5rem;
+        border-radius: 0.3rem;
+        border: 1px solid #1f77b4;
+        background: #1f77b4;
+        color: white;
+        cursor: pointer;
+    }
+    .board-canvas {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        gap: 0.75rem;
+    }
+    #boardCanvas {
+        width: 100%;
+        height: 560px;
+        border: 2px solid #d0d0d0;
+        border-radius: 0.5rem;
+        background: #ffffff;
+        touch-action: none;
+    }
+    .piece-controls {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+        align-items: center;
+    }
+    .piece-controls button {
+        padding: 0.4rem 0.75rem;
+        border-radius: 0.4rem;
+        border: 1px solid #666666;
+        background: #f2f2f2;
+        cursor: pointer;
+    }
+    .piece-controls button.primary {
+        border-color: #1f77b4;
+        background: #1f77b4;
+        color: white;
+    }
+    .piece-controls span {
+        font-weight: 600;
+    }
+    .hint {
+        font-size: 0.85rem;
+        color: #555555;
+    }
+    </style>
+    <div class="designer-wrapper">
+        <div class="track-library">
+            <h3>Hornby Set-Track</h3>
+            <p class="hint">Click "Add" to drop a piece onto the board. Drag pieces on the canvas and use the controls to rotate, flip, nudge or snap.</p>
+            $library_cards
+        </div>
+        <div class="board-canvas">
+            <canvas id="boardCanvas"></canvas>
+            <div class="piece-controls">
+                <span id="selectionLabel">No piece selected</span>
+                <button id="rotateLeft">⟲ Rotate -15°</button>
+                <button id="rotateRight">⟳ Rotate +15°</button>
+                <button id="flipPiece">Flip</button>
+                <button id="nudgeUp">▲ Nudge</button>
+                <button id="nudgeDown">▼ Nudge</button>
+                <button id="nudgeLeft">◀ Nudge</button>
+                <button id="nudgeRight">▶ Nudge</button>
+                <button id="snapGrid" class="primary">Snap to 10 mm</button>
+                <button id="deletePiece">🗑 Remove</button>
+            </div>
+            <p class="hint">Tip: hold and drag pieces directly on the board. Connection points appear as green markers to help with alignment.</p>
+        </div>
+    </div>
+    <script>
+    const boardData = $board_json;
+    const trackLibrary = $track_json;
+    const initialPlacements = $placements_json;
+    const libraryByCode = Object.fromEntries(trackLibrary.map(item => [item.code, item]));
+    const placements = initialPlacements.map((item, idx) => ({
+        id: item.id || ('placement-' + idx),
+        code: item.code,
+        x: typeof item.x === 'number' ? item.x : 0,
+        y: typeof item.y === 'number' ? item.y : 0,
+        rotation: typeof item.rotation === 'number' ? item.rotation : 0,
+        flipped: Boolean(item.flipped),
+    }));
+    let nextId = placements.length;
+    let selectedId = placements.length ? placements[placements.length - 1].id : null;
+
+    const canvas = document.getElementById('boardCanvas');
+    const ctx = canvas.getContext('2d');
+
+    const polygon = boardData.polygon && boardData.polygon.length ? boardData.polygon : [
+        [0, 0], [2400, 0], [2400, 1200], [0, 1200]
+    ];
+    const xs = polygon.map(pt => pt[0]);
+    const ys = polygon.map(pt => pt[1]);
+    const minX = Math.min(...xs);
+    const maxX = Math.max(...xs);
+    const minY = Math.min(...ys);
+    const maxY = Math.max(...ys);
+    const widthMm = Math.max(maxX - minX, 1);
+    const heightMm = Math.max(maxY - minY, 1);
+    const padding = 60;
+
+    function resizeCanvas() {
+        const rect = canvas.getBoundingClientRect();
+        canvas.width = rect.width;
+        canvas.height = rect.height;
+        draw();
+        requestFrameHeight();
+    }
+
+    function mmToCanvas(x, y) {
+        const scale = Math.min((canvas.width - padding * 2) / widthMm, (canvas.height - padding * 2) / heightMm);
+        const cx = (x - minX) * scale + padding;
+        const cy = canvas.height - ((y - minY) * scale + padding);
+        return { x: cx, y: cy, scale };
+    }
+
+    function canvasToMm(x, y) {
+        const scale = Math.min((canvas.width - padding * 2) / widthMm, (canvas.height - padding * 2) / heightMm);
+        const mmX = (x - padding) / scale + minX;
+        const mmY = ((canvas.height - y) - padding) / scale + minY;
+        return { x: mmX, y: mmY, scale };
+    }
+
+    function drawBoard() {
+        if (!polygon.length) {
+            return;
+        }
+        ctx.save();
+        ctx.beginPath();
+        polygon.forEach((pt, idx) => {
+            const { x, y } = mmToCanvas(pt[0], pt[1]);
+            if (idx === 0) {
+                ctx.moveTo(x, y);
+            } else {
+                ctx.lineTo(x, y);
+            }
+        });
+        ctx.closePath();
+        ctx.fillStyle = '#f5f7ff';
+        ctx.fill();
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = '#5a6aa1';
+        ctx.stroke();
+        ctx.restore();
+    }
+
+    function drawPlacements() {
+        placements.forEach(placement => {
+            const piece = libraryByCode[placement.code];
+            if (!piece) { return; }
+            const { x, y, scale } = mmToCanvas(placement.x, placement.y);
+            const rotation = (placement.rotation || 0) * Math.PI / 180;
+            const selected = placement.id === selectedId;
+            const displayLength = piece.displayLength || piece.length || 0;
+            const trackWidth = 32 * scale;
+            ctx.save();
+            ctx.translate(x, y);
+            ctx.rotate(-rotation);
+            if (piece.kind === 'curve' && piece.radius && piece.angle) {
+                const radiusPx = piece.radius * scale;
+                const startAngle = piece.angle * Math.PI / 180 / 2;
+                ctx.beginPath();
+                ctx.strokeStyle = selected ? '#d62728' : '#1f77b4';
+                ctx.lineWidth = 6;
+                ctx.arc(0, 0, radiusPx, startAngle, -startAngle, true);
+                ctx.stroke();
+            } else {
+                const halfLength = (displayLength / 2) * scale;
+                ctx.beginPath();
+                ctx.fillStyle = selected ? '#ffe5d1' : '#dce9ff';
+                ctx.strokeStyle = selected ? '#d62728' : '#1f77b4';
+                ctx.lineWidth = 2;
+                ctx.rect(-halfLength, -trackWidth / 2, halfLength * 2, trackWidth);
+                ctx.fill();
+                ctx.stroke();
+            }
+            ctx.restore();
+
+            // Connection points
+            const points = connectionPoints(placement);
+            points.forEach(pt => {
+                const { x: px, y: py } = mmToCanvas(pt.x, pt.y);
+                ctx.beginPath();
+                ctx.fillStyle = '#2ca02c';
+                ctx.arc(px, py, 6, 0, 2 * Math.PI);
+                ctx.fill();
+            });
+        });
+    }
+
+    function draw() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        drawBoard();
+        drawPlacements();
+    }
+
+    function connectionPoints(placement) {
+        const piece = libraryByCode[placement.code];
+        if (!piece) { return []; }
+        const rotation = (placement.rotation || 0) * Math.PI / 180;
+        if (piece.kind === 'curve' && piece.radius && piece.angle) {
+            const halfTheta = (piece.angle * Math.PI / 180) / 2;
+            const startAngle = rotation + halfTheta;
+            const endAngle = rotation - halfTheta;
+            return [
+                {
+                    x: placement.x + piece.radius * Math.cos(startAngle),
+                    y: placement.y + piece.radius * Math.sin(startAngle),
+                },
+                {
+                    x: placement.x + piece.radius * Math.cos(endAngle),
+                    y: placement.y + piece.radius * Math.sin(endAngle),
+                },
+            ];
+        }
+        const displayLength = piece.displayLength || piece.length || 0;
+        const dx = (displayLength / 2) * Math.cos(rotation);
+        const dy = (displayLength / 2) * Math.sin(rotation);
+        return [
+            { x: placement.x + dx, y: placement.y + dy },
+            { x: placement.x - dx, y: placement.y - dy },
+        ];
+    }
+
+    function emitState() {
+        const payload = {
+            placements: placements.map(item => ({
+                id: item.id,
+                code: item.code,
+                x: item.x,
+                y: item.y,
+                rotation: item.rotation,
+                flipped: item.flipped,
+            })),
+            board: boardData,
+        };
+        window.parent.postMessage({
+            isStreamlitMessage: true,
+            type: "streamlit:setComponentValue",
+            value: JSON.stringify(payload),
+        }, "*");
+    }
+
+    function requestFrameHeight() {
+        window.parent.postMessage({
+            isStreamlitMessage: true,
+            type: "streamlit:setFrameHeight",
+            height: document.body.scrollHeight,
+        }, "*");
+    }
+
+    function addPiece(code) {
+        const piece = libraryByCode[code];
+        if (!piece) { return; }
+        const newPlacement = {
+            id: 'placement-' + nextId++,
+            code,
+            x: (minX + maxX) / 2,
+            y: (minY + maxY) / 2,
+            rotation: 0,
+            flipped: false,
+        };
+        placements.push(newPlacement);
+        selectedId = newPlacement.id;
+        updateSelectionLabel();
+        draw();
+        emitState();
+    }
+
+    function updateSelectionLabel() {
+        const label = document.getElementById('selectionLabel');
+        const placement = placements.find(p => p.id === selectedId);
+        if (!placement) {
+            label.textContent = 'No piece selected';
+        } else {
+            const piece = libraryByCode[placement.code];
+            label.textContent = placement.code + ' · ' + (piece ? piece.name : '');
+        }
+    }
+
+    document.querySelectorAll('.add-piece').forEach(button => {
+        button.addEventListener('click', event => {
+            const code = event.currentTarget.getAttribute('data-code');
+            addPiece(code);
+        });
+    });
+
+    let dragging = false;
+    let dragOffset = { x: 0, y: 0 };
+
+    canvas.addEventListener('pointerdown', event => {
+        const rect = canvas.getBoundingClientRect();
+        const { x, y } = canvasToMm(event.clientX - rect.left, event.clientY - rect.top);
+        let found = null;
+        for (let i = placements.length - 1; i >= 0; i -= 1) {
+            if (hitTest(placements[i], x, y)) {
+                found = placements[i];
+                break;
+            }
+        }
+        if (found) {
+            selectedId = found.id;
+            dragOffset = { x: x - found.x, y: y - found.y };
+            dragging = true;
+            canvas.setPointerCapture(event.pointerId);
+            updateSelectionLabel();
+            draw();
+        } else {
+            selectedId = null;
+            updateSelectionLabel();
+            draw();
+        }
+    });
+
+    canvas.addEventListener('pointermove', event => {
+        if (!dragging || !selectedId) { return; }
+        const placement = placements.find(p => p.id === selectedId);
+        if (!placement) { return; }
+        const rect = canvas.getBoundingClientRect();
+        const { x, y } = canvasToMm(event.clientX - rect.left, event.clientY - rect.top);
+        placement.x = x - dragOffset.x;
+        placement.y = y - dragOffset.y;
+        draw();
+    });
+
+    canvas.addEventListener('pointerup', event => {
+        dragging = false;
+        if (canvas.hasPointerCapture(event.pointerId)) {
+            canvas.releasePointerCapture(event.pointerId);
+        }
+        emitState();
+    });
+
+    function hitTest(placement, x, y) {
+        const piece = libraryByCode[placement.code];
+        if (!piece) { return false; }
+        const rotation = (placement.rotation || 0) * Math.PI / 180;
+        const dx = x - placement.x;
+        const dy = y - placement.y;
+        const cos = Math.cos(rotation);
+        const sin = Math.sin(rotation);
+        const localX = cos * dx + sin * dy;
+        const localY = -sin * dx + cos * dy;
+        if (piece.kind === 'curve' && piece.radius) {
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            return Math.abs(dist - piece.radius) < 60;
+        }
+        const length = piece.displayLength || piece.length || 0;
+        return Math.abs(localX) <= length / 2 && Math.abs(localY) <= 50;
+    }
+
+    function adjustSelected(deltaRotation = 0, deltaX = 0, deltaY = 0) {
+        const placement = placements.find(p => p.id === selectedId);
+        if (!placement) { return; }
+        placement.rotation = (placement.rotation + deltaRotation + 360) % 360;
+        placement.x += deltaX;
+        placement.y += deltaY;
+        draw();
+        emitState();
+    }
+
+    document.getElementById('rotateLeft').addEventListener('click', () => adjustSelected(-15, 0, 0));
+    document.getElementById('rotateRight').addEventListener('click', () => adjustSelected(15, 0, 0));
+    document.getElementById('nudgeUp').addEventListener('click', () => adjustSelected(0, 0, 10));
+    document.getElementById('nudgeDown').addEventListener('click', () => adjustSelected(0, 0, -10));
+    document.getElementById('nudgeLeft').addEventListener('click', () => adjustSelected(0, -10, 0));
+    document.getElementById('nudgeRight').addEventListener('click', () => adjustSelected(0, 10, 0));
+    document.getElementById('flipPiece').addEventListener('click', () => {
+        const placement = placements.find(p => p.id === selectedId);
+        if (!placement) { return; }
+        placement.flipped = !placement.flipped;
+        draw();
+        emitState();
+    });
+    document.getElementById('snapGrid').addEventListener('click', () => {
+        const placement = placements.find(p => p.id === selectedId);
+        if (!placement) { return; }
+        placement.x = Math.round(placement.x / 10) * 10;
+        placement.y = Math.round(placement.y / 10) * 10;
+        placement.rotation = Math.round(placement.rotation / 15) * 15;
+        draw();
+        emitState();
+    });
+    document.getElementById('deletePiece').addEventListener('click', () => {
+        const index = placements.findIndex(p => p.id === selectedId);
+        if (index === -1) { return; }
+        placements.splice(index, 1);
+        selectedId = placements.length ? placements[placements.length - 1].id : null;
+        updateSelectionLabel();
+        draw();
+        emitState();
+    });
+
+    window.addEventListener('resize', resizeCanvas);
+    resizeCanvas();
+    updateSelectionLabel();
+    requestFrameHeight();
+    </script>
+    """
+    )
+
+    html = html_template.substitute(
+        library_cards="".join(library_cards),
+        board_json=json.dumps(board_payload),
+        track_json=json.dumps(track_payload),
+        placements_json=json.dumps(placements),
+    )
+
+    component_value = components.html(html, height=720, scrolling=True)
+    if component_value is None:
+        return placements
+    parsed: Dict[str, object]
+    if isinstance(component_value, str):
+        try:
+            parsed = json.loads(component_value)
+        except json.JSONDecodeError:
+            return placements
+    elif isinstance(component_value, dict):
+        parsed = component_value
+    else:
+        return placements
+    payload = parsed.get("placements") if isinstance(parsed, dict) else None
+    if isinstance(payload, list):
+        return [p for p in payload if isinstance(p, dict)]
+    return placements
 
 
 board = _board_controls()
-objectives, allowed_radii = _objective_controls()
-st.sidebar.header("Results")
-max_layouts = st.sidebar.slider("Number of layout options", min_value=1, max_value=6, value=3)
+st.sidebar.success(describe_board(board))
 
-st.info(describe_board(board))
+if "placements" not in st.session_state:
+    st.session_state["placements"] = []
 
-if allowed_radii:
-    allowed_radii_set = set(allowed_radii)
+placements: List[Dict[str, object]] = st.session_state["placements"]
+placements = _designer(board, placements)
+st.session_state["placements"] = placements
+
+
+library = hornby_track_library()
+inventory = inventory_from_placements(placements)
+total_length_mm = total_run_length_mm(placements)
+
+st.subheader("Inventory summary")
+cols = st.columns(3)
+cols[0].metric("Pieces placed", sum(inventory.values()))
+cols[1].metric("Unique catalogue items", len(inventory))
+cols[2].metric("Run length", f"{total_length_mm/1000:.2f} m")
+
+if inventory:
+    rows = []
+    for code, count in sorted(inventory.items()):
+        piece = library.get(code)
+        rows.append(
+            {
+                "Catalogue": code,
+                "Piece": piece.name if piece else "Unknown",
+                "Quantity": count,
+                "Length (mm)": f"{piece.arc_length():.0f}" if piece and piece.kind == "curve" else (f"{piece.length:.0f}" if piece else "-"),
+            }
+        )
+    st.dataframe(rows, hide_index=True, use_container_width=True)
 else:
-    allowed_radii_set = set()
-
-generator = get_generator()
-layouts = generator.generate(board, set(objectives), allowed_radii_set, max_layouts=max_layouts)
-
-if not layouts:
-    st.warning("No layouts match the chosen board size and goals. Try expanding the allowed radii or relaxing priorities.")
-else:
-    for plan in layouts:
-        st.divider()
-        _render_plan(plan, board)
+    st.info("Add pieces from the library to begin building your layout.")
