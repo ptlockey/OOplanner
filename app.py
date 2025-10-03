@@ -105,9 +105,21 @@ def _board_controls() -> BoardSpecification:
     return BoardSpecification(shape="custom", width=width, height=height, polygon=polygon)
 
 
-def _designer(board: BoardSpecification, placements: List[Dict[str, object]]) -> List[Dict[str, object]]:
+def _designer(
+    board: BoardSpecification,
+    placements: List[Dict[str, object]],
+    initial_zoom: float,
+) -> Tuple[List[Dict[str, object]], float]:
     library = hornby_track_library()
     board_polygon = board.polygon_points()
+    min_zoom = 0.4
+    max_zoom = 3.0
+    try:
+        initial_zoom_value = float(initial_zoom)
+    except (TypeError, ValueError):
+        initial_zoom_value = 1.0
+    clamped_initial_zoom = max(min(initial_zoom_value, max_zoom), min_zoom)
+    current_zoom = clamped_initial_zoom
     board_payload = {
         "polygon": board_polygon,
         "description": describe_board(board),
@@ -181,6 +193,32 @@ def _designer(board: BoardSpecification, placements: List[Dict[str, object]]) ->
         flex-direction: column;
         gap: 0.75rem;
     }
+    .view-controls {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+        align-items: center;
+    }
+    .view-controls label {
+        font-weight: 600;
+        font-size: 0.9rem;
+    }
+    .view-controls input[type="range"] {
+        flex: 1;
+        min-width: 160px;
+    }
+    .view-controls span {
+        min-width: 3rem;
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+    }
+    .view-controls button {
+        padding: 0.3rem 0.75rem;
+        border-radius: 0.4rem;
+        border: 1px solid #666666;
+        background: #f8f8f8;
+        cursor: pointer;
+    }
     #boardCanvas {
         width: 100%;
         height: 560px;
@@ -223,6 +261,12 @@ def _designer(board: BoardSpecification, placements: List[Dict[str, object]]) ->
         </div>
         <div class="board-canvas">
             <canvas id="boardCanvas"></canvas>
+            <div class="view-controls">
+                <label for="zoomSlider">Zoom</label>
+                <input type="range" id="zoomSlider" min="0.4" max="3" step="0.01" value="1" />
+                <span id="zoomValue">100%</span>
+                <button id="resetView" type="button">Reset view</button>
+            </div>
             <div class="piece-controls">
                 <span id="selectionLabel">No piece selected</span>
                 <button id="rotateLeft">⟲ Rotate -15°</button>
@@ -244,6 +288,7 @@ def _designer(board: BoardSpecification, placements: List[Dict[str, object]]) ->
     const boardData = $board_json;
     const trackLibrary = $track_json;
     const initialPlacements = $placements_json;
+    const initialZoom = $initial_zoom_json;
     const libraryByCode = Object.fromEntries(trackLibrary.map(item => [item.code, item]));
     const placements = initialPlacements.map((item, idx) => ({
         id: item.id || ('placement-' + idx),
@@ -258,9 +303,16 @@ def _designer(board: BoardSpecification, placements: List[Dict[str, object]]) ->
     let sectionMode = false;
     let activeSectionIds = null;
     const sectionInitialPositions = new Map();
+    const MIN_ZOOM = 0.4;
+    const MAX_ZOOM = 3;
+    let zoom = Number.isFinite(initialZoom) ? Math.min(Math.max(initialZoom, MIN_ZOOM), MAX_ZOOM) : 1;
+    let pan = { x: 0, y: 0 };
 
     const canvas = document.getElementById('boardCanvas');
     const ctx = canvas.getContext('2d');
+    const zoomSlider = document.getElementById('zoomSlider');
+    const zoomValueLabel = document.getElementById('zoomValue');
+    const resetViewButton = document.getElementById('resetView');
 
     const polygon = boardData.polygon && boardData.polygon.length ? boardData.polygon : [
         [0, 0], [2400, 0], [2400, 1200], [0, 1200]
@@ -324,25 +376,84 @@ def _designer(board: BoardSpecification, placements: List[Dict[str, object]]) ->
         return placements.find(item => item.id === id) || null;
     }
 
+    function computeBaseScale() {
+        const availableWidth = Math.max(canvas.width - padding * 2, 1);
+        const availableHeight = Math.max(canvas.height - padding * 2, 1);
+        return Math.min(availableWidth / widthMm, availableHeight / heightMm);
+    }
+
+    function getScale() {
+        return computeBaseScale() * zoom;
+    }
+
+    function clampPan() {
+        const scale = getScale();
+        const contentWidth = widthMm * scale + padding * 2;
+        const contentHeight = heightMm * scale + padding * 2;
+        const maxPanX = Math.max(contentWidth, canvas.width);
+        const maxPanY = Math.max(contentHeight, canvas.height);
+        pan.x = Math.min(Math.max(pan.x, -maxPanX), maxPanX);
+        pan.y = Math.min(Math.max(pan.y, -maxPanY), maxPanY);
+    }
+
+    function updateZoomUI() {
+        if (zoomSlider) {
+            zoomSlider.value = zoom.toFixed(2);
+        }
+        if (zoomValueLabel) {
+            zoomValueLabel.textContent = Math.round(zoom * 100) + '%';
+        }
+    }
+
+    function setZoom(targetZoom, focusPoint) {
+        const clamped = Math.min(Math.max(targetZoom, MIN_ZOOM), MAX_ZOOM);
+        if (!Number.isFinite(clamped) || Math.abs(clamped - zoom) < 1e-4) {
+            zoom = clamped;
+            updateZoomUI();
+            return;
+        }
+        const focus = focusPoint || { x: canvas.width / 2, y: canvas.height / 2 };
+        const mmBefore = canvasToMm(focus.x, focus.y);
+        zoom = clamped;
+        const after = mmToCanvas(mmBefore.x, mmBefore.y);
+        pan.x += focus.x - after.x;
+        pan.y += focus.y - after.y;
+        clampPan();
+        updateZoomUI();
+        draw();
+        emitState();
+    }
+
+    function resetView() {
+        zoom = 1;
+        pan = { x: 0, y: 0 };
+        clampPan();
+        updateZoomUI();
+        draw();
+        emitState();
+    }
+
     function resizeCanvas() {
         const rect = canvas.getBoundingClientRect();
         canvas.width = rect.width;
         canvas.height = rect.height;
+        clampPan();
+        updateZoomUI();
         draw();
         requestFrameHeight();
     }
 
     function mmToCanvas(x, y) {
-        const scale = Math.min((canvas.width - padding * 2) / widthMm, (canvas.height - padding * 2) / heightMm);
-        const cx = (x - minX) * scale + padding;
-        const cy = canvas.height - ((y - minY) * scale + padding);
+        const scale = getScale();
+        const cx = (x - minX) * scale + padding + pan.x;
+        const cy = canvas.height - ((y - minY) * scale + padding) + pan.y;
         return { x: cx, y: cy, scale };
     }
 
     function canvasToMm(x, y) {
-        const scale = Math.min((canvas.width - padding * 2) / widthMm, (canvas.height - padding * 2) / heightMm);
-        const mmX = (x - padding) / scale + minX;
-        const mmY = ((canvas.height - y) - padding) / scale + minY;
+        const scale = getScale();
+        const mmX = (x - padding - pan.x) / scale + minX;
+        const mmY = ((canvas.height - (y - pan.y)) - padding) / scale + minY;
         return { x: mmX, y: mmY, scale };
     }
 
@@ -587,6 +698,7 @@ def _designer(board: BoardSpecification, placements: List[Dict[str, object]]) ->
                 flipped: item.flipped,
             })),
             board: boardData,
+            zoom,
         };
         window.parent.postMessage({
             isStreamlitMessage: true,
@@ -641,8 +753,26 @@ def _designer(board: BoardSpecification, placements: List[Dict[str, object]]) ->
         });
     });
 
+    if (zoomSlider) {
+        zoomSlider.addEventListener('input', event => {
+            const target = parseFloat(event.target.value);
+            if (Number.isFinite(target)) {
+                setZoom(target, { x: canvas.width / 2, y: canvas.height / 2 });
+            }
+        });
+    }
+
+    if (resetViewButton) {
+        resetViewButton.addEventListener('click', () => {
+            resetView();
+        });
+    }
+
     let dragging = false;
     let dragOffset = { x: 0, y: 0 };
+    let viewPanning = false;
+    let panPointerStart = { x: 0, y: 0 };
+    let panStart = { x: 0, y: 0 };
 
     canvas.addEventListener('pointerdown', event => {
         const rect = canvas.getBoundingClientRect();
@@ -658,6 +788,7 @@ def _designer(board: BoardSpecification, placements: List[Dict[str, object]]) ->
             selectedId = found.id;
             dragOffset = { x: x - found.x, y: y - found.y };
             dragging = true;
+            viewPanning = false;
             canvas.setPointerCapture(event.pointerId);
             const sectionIds = sectionMode ? connectedSectionIds(found.id) : [found.id];
             activeSectionIds = new Set(sectionIds);
@@ -674,12 +805,30 @@ def _designer(board: BoardSpecification, placements: List[Dict[str, object]]) ->
             selectedId = null;
             activeSectionIds = null;
             sectionInitialPositions.clear();
+            viewPanning = false;
             updateSelectionLabel();
+            if (event.button === 0) {
+                viewPanning = true;
+                panPointerStart = { x: event.clientX, y: event.clientY };
+                panStart = { x: pan.x, y: pan.y };
+                canvas.setPointerCapture(event.pointerId);
+                event.preventDefault();
+            }
             draw();
         }
     });
 
     canvas.addEventListener('pointermove', event => {
+        if (viewPanning) {
+            event.preventDefault();
+            const dx = event.clientX - panPointerStart.x;
+            const dy = event.clientY - panPointerStart.y;
+            pan.x = panStart.x + dx;
+            pan.y = panStart.y + dy;
+            clampPan();
+            draw();
+            return;
+        }
         if (!dragging || !selectedId) { return; }
         const placement = getPlacementById(selectedId);
         if (!placement) { return; }
@@ -702,24 +851,62 @@ def _designer(board: BoardSpecification, placements: List[Dict[str, object]]) ->
     });
 
     canvas.addEventListener('pointerup', event => {
-        dragging = false;
-        activeSectionIds = null;
-        sectionInitialPositions.clear();
         if (canvas.hasPointerCapture(event.pointerId)) {
             canvas.releasePointerCapture(event.pointerId);
         }
-        emitState();
+        let shouldEmit = false;
+        if (dragging) {
+            dragging = false;
+            activeSectionIds = null;
+            sectionInitialPositions.clear();
+            shouldEmit = true;
+        }
+        if (viewPanning) {
+            viewPanning = false;
+            shouldEmit = true;
+        }
+        if (shouldEmit) {
+            emitState();
+        }
     });
 
     canvas.addEventListener('pointercancel', event => {
-        dragging = false;
-        activeSectionIds = null;
-        sectionInitialPositions.clear();
         if (canvas.hasPointerCapture(event.pointerId)) {
             canvas.releasePointerCapture(event.pointerId);
         }
-        emitState();
+        let shouldEmit = false;
+        if (dragging) {
+            dragging = false;
+            activeSectionIds = null;
+            sectionInitialPositions.clear();
+            shouldEmit = true;
+        }
+        if (viewPanning) {
+            viewPanning = false;
+            shouldEmit = true;
+        }
+        if (shouldEmit) {
+            emitState();
+        }
     });
+
+    canvas.addEventListener('wheel', event => {
+        event.preventDefault();
+        if (event.ctrlKey || event.metaKey) {
+            const rect = canvas.getBoundingClientRect();
+            const focus = {
+                x: event.clientX - rect.left,
+                y: event.clientY - rect.top,
+            };
+            const zoomFactor = Math.exp(-event.deltaY * 0.0015);
+            setZoom(zoom * zoomFactor, focus);
+        } else {
+            pan.x -= event.deltaX;
+            pan.y -= event.deltaY;
+            clampPan();
+            draw();
+        }
+    }, { passive: false });
 
     function hitTest(placement, x, y) {
         const piece = libraryByCode[placement.code];
@@ -839,25 +1026,30 @@ def _designer(board: BoardSpecification, placements: List[Dict[str, object]]) ->
         board_json=json.dumps(board_payload),
         track_json=json.dumps(track_payload),
         placements_json=json.dumps(placements),
+        initial_zoom_json=json.dumps(clamped_initial_zoom),
     )
 
-    component_value = components.html(html, height=720, scrolling=True)
+    component_value = components.html(html, height=760, scrolling=True)
     if component_value is None:
-        return placements
+        return placements, current_zoom
     parsed: Dict[str, object]
     if isinstance(component_value, str):
         try:
             parsed = json.loads(component_value)
         except json.JSONDecodeError:
-            return placements
+            return placements, current_zoom
     elif isinstance(component_value, dict):
         parsed = component_value
     else:
-        return placements
+        return placements, current_zoom
     payload = parsed.get("placements") if isinstance(parsed, dict) else None
+    zoom_value = parsed.get("zoom") if isinstance(parsed, dict) else None
+    if isinstance(zoom_value, (int, float)):
+        current_zoom = max(min(float(zoom_value), max_zoom), min_zoom)
+    updated = placements
     if isinstance(payload, list):
-        return [p for p in payload if isinstance(p, dict)]
-    return placements
+        updated = [p for p in payload if isinstance(p, dict)]
+    return updated, current_zoom
 
 
 board = _board_controls()
@@ -866,9 +1058,14 @@ st.sidebar.success(describe_board(board))
 if "placements" not in st.session_state:
     st.session_state["placements"] = []
 
+if "zoom" not in st.session_state:
+    st.session_state["zoom"] = 1.0
+
 placements: List[Dict[str, object]] = st.session_state["placements"]
-placements = _designer(board, placements)
+current_zoom: float = float(st.session_state.get("zoom", 1.0))
+placements, current_zoom = _designer(board, placements, current_zoom)
 st.session_state["placements"] = placements
+st.session_state["zoom"] = current_zoom
 
 
 library = hornby_track_library()
