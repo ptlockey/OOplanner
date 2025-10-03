@@ -27,13 +27,17 @@ st.write(
 )
 
 
-def _normalise_layout_payload(data: object) -> Tuple[List[Dict[str, object]], Optional[float]]:
-    """Extract placements and optional zoom from a parsed JSON payload."""
+def _normalise_layout_payload(
+    data: object,
+) -> Tuple[List[Dict[str, object]], List[Dict[str, object]], Optional[float]]:
+    """Extract placements, planning circles and optional zoom from payload."""
 
     placements_payload: object
+    circles_payload: object = []
     zoom_value: Optional[float] = None
     if isinstance(data, dict):
         placements_payload = data.get("placements")
+        circles_payload = data.get("circles")
         zoom_raw = data.get("zoom")
         if isinstance(zoom_raw, (int, float)):
             zoom_value = float(zoom_raw)
@@ -42,6 +46,16 @@ def _normalise_layout_payload(data: object) -> Tuple[List[Dict[str, object]], Op
 
     if not isinstance(placements_payload, list):
         raise ValueError("Layout JSON must contain a list of placements.")
+
+    def _to_float(value: object, default: float = 0.0) -> float:
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            try:
+                return float(value)
+            except ValueError:
+                return default
+        return default
 
     normalised: List[Dict[str, object]] = []
     saw_item = False
@@ -55,16 +69,6 @@ def _normalise_layout_payload(data: object) -> Tuple[List[Dict[str, object]], Op
         placement_id = raw_item.get("id")
         if not isinstance(placement_id, str) or not placement_id:
             placement_id = f"placement-{idx}"
-
-        def _to_float(value: object, default: float = 0.0) -> float:
-            if isinstance(value, (int, float)):
-                return float(value)
-            if isinstance(value, str):
-                try:
-                    return float(value)
-                except ValueError:
-                    return default
-            return default
 
         x_val = _to_float(raw_item.get("x"), 0.0)
         y_val = _to_float(raw_item.get("y"), 0.0)
@@ -85,7 +89,34 @@ def _normalise_layout_payload(data: object) -> Tuple[List[Dict[str, object]], Op
     if saw_item and not normalised:
         raise ValueError("No valid placements were found in the layout JSON.")
 
-    return normalised, zoom_value
+    circles: List[Dict[str, object]] = []
+    if isinstance(circles_payload, list):
+        for idx, raw_circle in enumerate(circles_payload):
+            if not isinstance(raw_circle, dict):
+                continue
+            circle_id = raw_circle.get("id")
+            if not isinstance(circle_id, str) or not circle_id:
+                circle_id = f"circle-{idx}"
+            radius = _to_float(raw_circle.get("radius"), 0.0)
+            if radius <= 0:
+                continue
+            x_val = _to_float(raw_circle.get("x"), 0.0)
+            y_val = _to_float(raw_circle.get("y"), 0.0)
+            color_val = raw_circle.get("color")
+            label_val = raw_circle.get("label")
+            circle: Dict[str, object] = {
+                "id": circle_id,
+                "radius": radius,
+                "x": x_val,
+                "y": y_val,
+            }
+            if isinstance(color_val, str) and color_val:
+                circle["color"] = color_val
+            if isinstance(label_val, str) and label_val:
+                circle["label"] = label_val
+            circles.append(circle)
+
+    return normalised, circles, zoom_value
 
 
 def _board_controls() -> BoardSpecification:
@@ -171,8 +202,9 @@ def _board_controls() -> BoardSpecification:
 def _designer(
     board: BoardSpecification,
     placements: List[Dict[str, object]],
+    circles: List[Dict[str, object]],
     initial_zoom: float,
-) -> Tuple[List[Dict[str, object]], float]:
+) -> Tuple[List[Dict[str, object]], List[Dict[str, object]], float]:
     library = hornby_track_library()
     board_polygon = board.polygon_points()
     min_zoom = 0.4
@@ -202,12 +234,21 @@ def _designer(
 
     library_cards = []
     for item in track_payload:
+        extra_controls = ""
+        if item["kind"] == "curve" and item.get("radius"):
+            extra_controls = (
+                f"<button data-radius=\"{item['radius']}\" data-label=\"{item['code']} ({item['radius']:.0f} mm)\" "
+                "class=\"add-circle\">Add guide circle</button>"
+            )
+        radius_fragment = f" · Radius {item['radius']:.0f} mm" if item.get("radius") else ""
         card = (
             "<div class=\"library-item\">"
-            f"<strong>{item['code']}</strong><br/>"
-            f"<span>{item['name']}</span><br/>"
-            f"<small>{item['kind'].title()} · {item['displayLength']:.0f} mm</small>"
+            f"<div class=\"library-heading\"><strong>{item['code']}</strong><span>{item['name']}</span></div>"
+            f"<small>{item['kind'].title()} · {item['displayLength']:.0f} mm{radius_fragment}</small>"
+            f"<div class=\"library-actions\">"
             f"<button data-code=\"{item['code']}\" class=\"add-piece\">Add to board</button>"
+            f"{extra_controls}"
+            "</div>"
             "</div>"
         )
         library_cards.append(card)
@@ -217,44 +258,29 @@ def _designer(
     <style>
     .designer-wrapper {
         display: flex;
+        flex-direction: column;
         gap: 1rem;
         font-family: 'Source Sans Pro', sans-serif;
     }
-    .track-library {
-        width: 260px;
-        max-height: 640px;
-        overflow-y: auto;
-        border: 1px solid #d0d0d0;
-        border-radius: 0.5rem;
-        padding: 0.75rem;
-        background: #f8f9fb;
-    }
-    .track-library h3 {
-        margin-top: 0;
-        font-size: 1.1rem;
-    }
-    .library-item {
-        border: 1px solid #d7d7d7;
-        border-radius: 0.4rem;
-        padding: 0.5rem;
-        margin-bottom: 0.5rem;
-        background: #ffffff;
-    }
-    .library-item button {
-        margin-top: 0.4rem;
-        width: 100%;
-        padding: 0.35rem 0.5rem;
-        border-radius: 0.3rem;
-        border: 1px solid #1f77b4;
-        background: #1f77b4;
-        color: white;
-        cursor: pointer;
-    }
     .board-canvas {
-        flex: 1;
         display: flex;
         flex-direction: column;
         gap: 0.75rem;
+    }
+    .board-surface {
+        position: relative;
+        border: 2px solid #d0d0d0;
+        border-radius: 0.5rem;
+        background: #ffffff;
+        overflow: hidden;
+        min-height: 580px;
+        height: min(900px, 72vh);
+    }
+    #boardCanvas {
+        width: 100%;
+        height: 100%;
+        touch-action: none;
+        display: block;
     }
     .view-controls {
         display: flex;
@@ -281,14 +307,6 @@ def _designer(
         border: 1px solid #666666;
         background: #f8f8f8;
         cursor: pointer;
-    }
-    #boardCanvas {
-        width: 100%;
-        height: 560px;
-        border: 2px solid #d0d0d0;
-        border-radius: 0.5rem;
-        background: #ffffff;
-        touch-action: none;
     }
     .piece-controls {
         display: flex;
@@ -333,15 +351,118 @@ def _designer(
     .export-controls .hint {
         margin: 0;
     }
+    details.library-panel {
+        border: 1px solid #d0d0d0;
+        border-radius: 0.5rem;
+        background: #f8f9fb;
+        padding: 0.5rem 0.75rem 0.75rem;
+    }
+    details.library-panel > summary {
+        cursor: pointer;
+        font-weight: 600;
+        font-size: 1.05rem;
+        margin-bottom: 0.5rem;
+        outline: none;
+    }
+    .library-grid {
+        display: grid;
+        gap: 0.5rem;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    }
+    .library-item {
+        border: 1px solid #d7d7d7;
+        border-radius: 0.45rem;
+        padding: 0.6rem;
+        background: #ffffff;
+        display: flex;
+        flex-direction: column;
+        gap: 0.35rem;
+    }
+    .library-heading {
+        display: flex;
+        justify-content: space-between;
+        align-items: baseline;
+        gap: 0.5rem;
+    }
+    .library-heading span {
+        font-size: 0.9rem;
+        color: #444444;
+    }
+    .library-item small {
+        color: #666666;
+    }
+    .library-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.4rem;
+    }
+    .library-actions button {
+        flex: 1 1 auto;
+        padding: 0.35rem 0.5rem;
+        border-radius: 0.3rem;
+        border: 1px solid #1f77b4;
+        background: #1f77b4;
+        color: white;
+        cursor: pointer;
+        font-size: 0.85rem;
+    }
+    .library-actions button.add-circle {
+        border-color: #9467bd;
+        background: #9467bd;
+    }
+    .circle-panel {
+        margin-top: 1rem;
+        border-top: 1px solid #d0d0d0;
+        padding-top: 0.75rem;
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+    }
+    .circle-list {
+        display: flex;
+        flex-direction: column;
+        gap: 0.4rem;
+    }
+    .circle-item {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0.5rem;
+        border: 1px solid #d7d7d7;
+        border-radius: 0.45rem;
+        padding: 0.4rem 0.6rem;
+        background: #ffffff;
+    }
+    .circle-item.selected {
+        border-color: #9467bd;
+        box-shadow: 0 0 0 2px rgba(148, 103, 189, 0.25);
+    }
+    .circle-swatch {
+        width: 18px;
+        height: 18px;
+        border-radius: 50%;
+        border: 2px solid rgba(0, 0, 0, 0.1);
+    }
+    .circle-meta {
+        flex: 1 1 auto;
+        min-width: 160px;
+        font-size: 0.85rem;
+    }
+    .circle-actions button {
+        padding: 0.3rem 0.6rem;
+        border-radius: 0.3rem;
+        border: 1px solid #d62728;
+        background: #d62728;
+        color: white;
+        cursor: pointer;
+        font-size: 0.8rem;
+    }
     </style>
     <div class="designer-wrapper">
-        <div class="track-library">
-            <h3>Hornby Set-Track</h3>
-            <p class="hint">Click "Add" to drop a piece onto the board. Drag pieces on the canvas and use the controls to rotate, flip, nudge or snap.</p>
-            $library_cards
-        </div>
         <div class="board-canvas">
-            <canvas id="boardCanvas"></canvas>
+            <div class="board-surface">
+                <canvas id="boardCanvas"></canvas>
+            </div>
             <div class="view-controls">
                 <label for="zoomSlider">Zoom</label>
                 <input type="range" id="zoomSlider" min="0.4" max="3" step="0.01" value="1" />
@@ -368,11 +489,22 @@ def _designer(
                 <p class="hint">Download a JSON backup of the current plan.</p>
             </div>
         </div>
+        <details class="library-panel" open>
+            <summary>Track library and curve guides</summary>
+            <p class="hint">Click "Add to board" to drop a piece. Curved pieces also offer a planning circle that you can drag on the board.</p>
+            <div class="library-grid">$library_cards</div>
+            <div class="circle-panel">
+                <h4>Planning circles</h4>
+                <p class="hint">Drag circles on the canvas to position them. Use them to visualise curve radii and loops.</p>
+                <div id="circleList" class="circle-list"></div>
+            </div>
+        </details>
     </div>
     <script>
     const boardData = $board_json;
     const trackLibrary = $track_json;
     const initialPlacements = $placements_json;
+    const initialCircles = $circles_json;
     const initialZoom = $initial_zoom_json;
     const libraryByCode = Object.fromEntries(trackLibrary.map(item => [item.code, item]));
     const placements = initialPlacements.map((item, idx) => ({
@@ -385,6 +517,8 @@ def _designer(
     }));
     let nextId = placements.length;
     let selectedId = placements.length ? placements[placements.length - 1].id : null;
+    const colorPalette = ['#ff7f0e', '#9467bd', '#2ca02c', '#d62728', '#17becf', '#1f77b4'];
+    let nextCircleColor = 0;
     let sectionMode = false;
     let activeSectionIds = null;
     const sectionInitialPositions = new Map();
@@ -411,6 +545,25 @@ def _designer(
     const widthMm = Math.max(maxX - minX, 1);
     const heightMm = Math.max(maxY - minY, 1);
     const padding = 60;
+    const boardCenter = { x: (minX + maxX) / 2, y: (minY + maxY) / 2 };
+    const guideCircles = initialCircles.map((circle, idx) => {
+        const radius = typeof circle.radius === 'number' ? circle.radius : 0;
+        if (!radius || radius <= 0) { return null; }
+        const x = typeof circle.x === 'number' ? circle.x : boardCenter.x;
+        const y = typeof circle.y === 'number' ? circle.y : boardCenter.y;
+        return {
+            id: circle.id || ('circle-' + idx),
+            radius,
+            x,
+            y,
+            color: typeof circle.color === 'string' && circle.color ? circle.color : colorPalette[nextCircleColor++ % colorPalette.length],
+            label: typeof circle.label === 'string' && circle.label ? circle.label : `Radius $${radius.toFixed(0)} mm`,
+        };
+    }).filter(Boolean);
+    let circleCounter = guideCircles.length;
+    let selectedCircleId = guideCircles.length ? guideCircles[guideCircles.length - 1].id : null;
+    let draggingCircleId = null;
+    let circleDragOffset = { x: 0, y: 0 };
     const SNAP_DISTANCE_MM = 200;
     const CONNECTION_TOLERANCE_MM = 3;
     const ANGLE_TOLERANCE_RAD = Math.PI / 36;
@@ -609,9 +762,35 @@ def _designer(
         });
     }
 
+    function drawGuideCircles() {
+        guideCircles.forEach(circle => {
+            const { x, y, scale } = mmToCanvas(circle.x, circle.y);
+            const radiusPx = circle.radius * scale;
+            ctx.save();
+            ctx.beginPath();
+            ctx.setLineDash([10, 6]);
+            ctx.lineWidth = circle.id === selectedCircleId ? 3 : 2;
+            ctx.strokeStyle = circle.color || '#ff7f0e';
+            ctx.arc(x, y, radiusPx, 0, Math.PI * 2);
+            ctx.stroke();
+            ctx.setLineDash([]);
+            ctx.fillStyle = circle.color || '#ff7f0e';
+            ctx.globalAlpha = 0.12;
+            ctx.beginPath();
+            ctx.arc(x, y, 8, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.globalAlpha = 1;
+            ctx.beginPath();
+            ctx.arc(x, y, 4, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.restore();
+        });
+    }
+
     function draw() {
         ctx.clearRect(0, 0, canvas.width, canvas.height);
         drawBoard();
+        drawGuideCircles();
         drawPlacements();
     }
 
@@ -818,6 +997,14 @@ def _designer(
                 rotation: item.rotation,
                 flipped: item.flipped,
             })),
+            circles: guideCircles.map(circle => ({
+                id: circle.id,
+                radius: circle.radius,
+                x: circle.x,
+                y: circle.y,
+                color: circle.color,
+                label: circle.label,
+            })),
             board: boardData,
             zoom,
         };
@@ -827,6 +1014,16 @@ def _designer(
             value: JSON.stringify(payload),
         }, "*");
         return payload;
+    }
+
+    function getCircleById(id) {
+        return guideCircles.find(circle => circle.id === id) || null;
+    }
+
+    function nextCircleColour() {
+        const colour = colorPalette[nextCircleColor % colorPalette.length];
+        nextCircleColor += 1;
+        return colour;
     }
 
     function requestFrameHeight() {
@@ -843,8 +1040,8 @@ def _designer(
         const newPlacement = {
             id: 'placement-' + nextId++,
             code,
-            x: (minX + maxX) / 2,
-            y: (minY + maxY) / 2,
+            x: boardCenter.x,
+            y: boardCenter.y,
             rotation: 0,
             flipped: false,
         };
@@ -860,18 +1057,46 @@ def _designer(
     function updateSelectionLabel() {
         const label = document.getElementById('selectionLabel');
         const placement = placements.find(p => p.id === selectedId);
-        if (!placement) {
-            label.textContent = 'No piece selected';
-        } else {
+        const circle = getCircleById(selectedCircleId);
+        if (placement) {
             const piece = libraryByCode[placement.code];
             label.textContent = placement.code + ' · ' + (piece ? piece.name : '');
+            return;
         }
+        if (circle) {
+            label.textContent = circle.label || `Guide circle · $${circle.radius.toFixed(0)} mm`;
+            return;
+        }
+        label.textContent = 'No piece selected';
     }
 
     document.querySelectorAll('.add-piece').forEach(button => {
         button.addEventListener('click', event => {
             const code = event.currentTarget.getAttribute('data-code');
             addPiece(code);
+        });
+    });
+
+    document.querySelectorAll('.add-circle').forEach(button => {
+        button.addEventListener('click', event => {
+            const radius = parseFloat(event.currentTarget.getAttribute('data-radius'));
+            if (!Number.isFinite(radius) || radius <= 0) { return; }
+            const label = event.currentTarget.getAttribute('data-label') || `Radius $${radius.toFixed(0)} mm`;
+            const newCircle = {
+                id: 'circle-' + (circleCounter++),
+                radius,
+                x: boardCenter.x,
+                y: boardCenter.y,
+                color: nextCircleColour(),
+                label,
+            };
+            guideCircles.push(newCircle);
+            selectedCircleId = newCircle.id;
+            selectedId = null;
+            updateSelectionLabel();
+            renderCircleList();
+            draw();
+            emitState();
         });
     });
 
@@ -899,6 +1124,21 @@ def _designer(
     canvas.addEventListener('pointerdown', event => {
         const rect = canvas.getBoundingClientRect();
         const { x, y } = canvasToMm(event.clientX - rect.left, event.clientY - rect.top);
+        for (let i = guideCircles.length - 1; i >= 0; i -= 1) {
+            const circle = guideCircles[i];
+            const distance = Math.hypot(x - circle.x, y - circle.y);
+            if (distance <= circle.radius) {
+                selectedCircleId = circle.id;
+                selectedId = null;
+                draggingCircleId = circle.id;
+                circleDragOffset = { x: x - circle.x, y: y - circle.y };
+                canvas.setPointerCapture(event.pointerId);
+                updateSelectionLabel();
+                renderCircleList();
+                draw();
+                return;
+            }
+        }
         let found = null;
         for (let i = placements.length - 1; i >= 0; i -= 1) {
             if (hitTest(placements[i], x, y)) {
@@ -908,6 +1148,7 @@ def _designer(
         }
         if (found) {
             selectedId = found.id;
+            selectedCircleId = null;
             dragOffset = { x: x - found.x, y: y - found.y };
             dragging = true;
             viewPanning = false;
@@ -925,6 +1166,7 @@ def _designer(
             draw();
         } else {
             selectedId = null;
+            selectedCircleId = null;
             activeSectionIds = null;
             sectionInitialPositions.clear();
             viewPanning = false;
@@ -941,6 +1183,18 @@ def _designer(
     });
 
     canvas.addEventListener('pointermove', event => {
+        if (draggingCircleId) {
+            event.preventDefault();
+            const rect = canvas.getBoundingClientRect();
+            const { x, y } = canvasToMm(event.clientX - rect.left, event.clientY - rect.top);
+            const circle = getCircleById(draggingCircleId);
+            if (circle) {
+                circle.x = x - circleDragOffset.x;
+                circle.y = y - circleDragOffset.y;
+                draw();
+            }
+            return;
+        }
         if (viewPanning) {
             event.preventDefault();
             const dx = event.clientX - panPointerStart.x;
@@ -987,6 +1241,11 @@ def _designer(
             viewPanning = false;
             shouldEmit = true;
         }
+        if (draggingCircleId) {
+            draggingCircleId = null;
+            renderCircleList();
+            shouldEmit = true;
+        }
         if (shouldEmit) {
             emitState();
         }
@@ -1005,6 +1264,11 @@ def _designer(
         }
         if (viewPanning) {
             viewPanning = false;
+            shouldEmit = true;
+        }
+        if (draggingCircleId) {
+            draggingCircleId = null;
+            renderCircleList();
             shouldEmit = true;
         }
         if (shouldEmit) {
@@ -1123,6 +1387,18 @@ def _designer(
         });
     }
     document.getElementById('deletePiece').addEventListener('click', () => {
+        if (selectedCircleId) {
+            const circleIndex = guideCircles.findIndex(circle => circle.id === selectedCircleId);
+            if (circleIndex !== -1) {
+                guideCircles.splice(circleIndex, 1);
+                selectedCircleId = guideCircles.length ? guideCircles[guideCircles.length - 1].id : null;
+                renderCircleList();
+                updateSelectionLabel();
+                draw();
+                emitState();
+                return;
+            }
+        }
         const index = placements.findIndex(p => p.id === selectedId);
         if (index === -1) { return; }
         placements.splice(index, 1);
@@ -1133,6 +1409,65 @@ def _designer(
         draw();
         emitState();
     });
+
+    function renderCircleList() {
+        const list = document.getElementById('circleList');
+        if (!list) { return; }
+        if (!guideCircles.length) {
+            list.innerHTML = '<p class="hint">No planning circles added yet.</p>';
+            requestFrameHeight();
+            return;
+        }
+        const entries = guideCircles.map(circle => {
+            const selected = circle.id === selectedCircleId ? ' selected' : '';
+            const label = circle.label || `Radius $${circle.radius.toFixed(0)} mm`;
+            const position = `Centre $${circle.x.toFixed(0)} mm · $${circle.y.toFixed(0)} mm`;
+            const colour = circle.color || '#ff7f0e';
+            return `
+                <div class="circle-item$${selected}" data-id="$${circle.id}">
+                    <span class="circle-swatch" style="background:$${colour}"></span>
+                    <div class="circle-meta">
+                        <div><strong>$${label}</strong></div>
+                        <div>$${position}</div>
+                    </div>
+                    <div class="circle-actions">
+                        <button type="button" data-action="remove" data-id="$${circle.id}">Remove</button>
+                    </div>
+                </div>
+            `;
+        });
+        list.innerHTML = entries.join('');
+        list.querySelectorAll('.circle-item').forEach(item => {
+            item.addEventListener('click', () => {
+                const id = item.getAttribute('data-id');
+                if (!id) { return; }
+                selectedCircleId = id;
+                selectedId = null;
+                updateSelectionLabel();
+                renderCircleList();
+                draw();
+                emitState();
+            });
+        });
+        list.querySelectorAll('button[data-action="remove"]').forEach(button => {
+            button.addEventListener('click', event => {
+                event.stopPropagation();
+                const id = event.currentTarget.getAttribute('data-id');
+                const index = guideCircles.findIndex(circle => circle.id === id);
+                if (index !== -1) {
+                    guideCircles.splice(index, 1);
+                    if (selectedCircleId === id) {
+                        selectedCircleId = guideCircles.length ? guideCircles[guideCircles.length - 1].id : null;
+                    }
+                    renderCircleList();
+                    updateSelectionLabel();
+                    draw();
+                    emitState();
+                }
+            });
+        });
+        requestFrameHeight();
+    }
 
     const saveLayoutButton = document.getElementById('saveLayout');
     if (saveLayoutButton) {
@@ -1156,6 +1491,7 @@ def _designer(
     resizeCanvas();
     updateSelectionLabel();
     updateSectionToggleButton();
+    renderCircleList();
     requestFrameHeight();
     </script>
     """
@@ -1166,30 +1502,35 @@ def _designer(
         board_json=json.dumps(board_payload),
         track_json=json.dumps(track_payload),
         placements_json=json.dumps(placements),
+        circles_json=json.dumps(circles),
         initial_zoom_json=json.dumps(clamped_initial_zoom),
     )
 
-    component_value = components.html(html, height=760, scrolling=True)
+    component_value = components.html(html, height=860, scrolling=True)
     if component_value is None:
-        return placements, current_zoom
+        return placements, circles, current_zoom
     parsed: Dict[str, object]
     if isinstance(component_value, str):
         try:
             parsed = json.loads(component_value)
         except json.JSONDecodeError:
-            return placements, current_zoom
+            return placements, circles, current_zoom
     elif isinstance(component_value, dict):
         parsed = component_value
     else:
-        return placements, current_zoom
+        return placements, circles, current_zoom
     payload = parsed.get("placements") if isinstance(parsed, dict) else None
     zoom_value = parsed.get("zoom") if isinstance(parsed, dict) else None
+    circles_payload = parsed.get("circles") if isinstance(parsed, dict) else None
     if isinstance(zoom_value, (int, float)):
         current_zoom = max(min(float(zoom_value), max_zoom), min_zoom)
     updated = placements
     if isinstance(payload, list):
         updated = [p for p in payload if isinstance(p, dict)]
-    return updated, current_zoom
+    updated_circles = circles
+    if isinstance(circles_payload, list):
+        updated_circles = [c for c in circles_payload if isinstance(c, dict)]
+    return updated, updated_circles, current_zoom
 
 
 board = _board_controls()
@@ -1217,30 +1558,37 @@ if "placements" not in st.session_state:
 if "zoom" not in st.session_state:
     st.session_state["zoom"] = 1.0
 
+if "circles" not in st.session_state:
+    st.session_state["circles"] = []
+
 uploaded_layout = st.sidebar.file_uploader("Load layout JSON", type=["json"])
 if uploaded_layout is not None:
     try:
         raw_text = uploaded_layout.getvalue().decode("utf-8")
         parsed_payload = json.loads(raw_text)
-        loaded_placements, loaded_zoom = _normalise_layout_payload(parsed_payload)
+        loaded_placements, loaded_circles, loaded_zoom = _normalise_layout_payload(parsed_payload)
     except UnicodeDecodeError:
         st.sidebar.error("Could not decode the uploaded file. Please upload UTF-8 JSON.")
     except (json.JSONDecodeError, ValueError) as exc:
         st.sidebar.error(f"Unable to load layout: {exc}")
     else:
         st.session_state["placements"] = loaded_placements
+        st.session_state["circles"] = loaded_circles
         if loaded_zoom is not None:
             st.session_state["zoom"] = loaded_zoom
         st.sidebar.success(f"Loaded {len(loaded_placements)} placement{'s' if len(loaded_placements) != 1 else ''} from layout.")
 
 placements: List[Dict[str, object]] = st.session_state["placements"]
+circles: List[Dict[str, object]] = st.session_state.get("circles", [])
 current_zoom: float = float(st.session_state.get("zoom", 1.0))
-placements, current_zoom = _designer(board, placements, current_zoom)
+placements, circles, current_zoom = _designer(board, placements, circles, current_zoom)
 st.session_state["placements"] = placements
+st.session_state["circles"] = circles
 st.session_state["zoom"] = current_zoom
 
 layout_payload = {
     "placements": placements,
+    "circles": circles,
     "board": {
         "description": describe_board(board),
         "polygon": board.polygon_points(),
