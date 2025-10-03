@@ -232,10 +232,12 @@ def _designer(board: BoardSpecification, placements: List[Dict[str, object]]) ->
                 <button id="nudgeDown">▼ Nudge</button>
                 <button id="nudgeLeft">◀ Nudge</button>
                 <button id="nudgeRight">▶ Nudge</button>
-                <button id="snapGrid" class="primary">Snap to 10 mm</button>
+                <button id="snapPiece" class="primary">Snap to piece</button>
+                <button id="snapGrid">Snap to 10 mm</button>
+                <button id="toggleSectionMode">Section move: Off</button>
                 <button id="deletePiece">🗑 Remove</button>
             </div>
-            <p class="hint">Tip: hold and drag pieces directly on the board. Connection points appear as green markers to help with alignment.</p>
+            <p class="hint">Tip: drag pieces directly on the board. Use "Snap to piece" to connect endpoints, or toggle section move to reposition an entire connected run.</p>
         </div>
     </div>
     <script>
@@ -253,6 +255,9 @@ def _designer(board: BoardSpecification, placements: List[Dict[str, object]]) ->
     }));
     let nextId = placements.length;
     let selectedId = placements.length ? placements[placements.length - 1].id : null;
+    let sectionMode = false;
+    let activeSectionIds = null;
+    const sectionInitialPositions = new Map();
 
     const canvas = document.getElementById('boardCanvas');
     const ctx = canvas.getContext('2d');
@@ -269,6 +274,55 @@ def _designer(board: BoardSpecification, placements: List[Dict[str, object]]) ->
     const widthMm = Math.max(maxX - minX, 1);
     const heightMm = Math.max(maxY - minY, 1);
     const padding = 60;
+    const SNAP_DISTANCE_MM = 200;
+    const CONNECTION_TOLERANCE_MM = 6;
+    const ANGLE_TOLERANCE_RAD = Math.PI / 12;
+
+    function toRadians(degrees) {
+        return (degrees || 0) * Math.PI / 180;
+    }
+
+    function toDegrees(radians) {
+        return radians * 180 / Math.PI;
+    }
+
+    function normalizeRadians(angle) {
+        if (!isFinite(angle)) { return 0; }
+        const twoPi = Math.PI * 2;
+        let value = angle % twoPi;
+        if (value <= -Math.PI) {
+            value += twoPi;
+        }
+        if (value > Math.PI) {
+            value -= twoPi;
+        }
+        return value;
+    }
+
+    function normalizeDegrees(angle) {
+        if (!isFinite(angle)) { return 0; }
+        let value = angle % 360;
+        if (value <= -180) {
+            value += 360;
+        }
+        if (value > 180) {
+            value -= 360;
+        }
+        return value;
+    }
+
+    function rotatePoint(x, y, angle) {
+        const cos = Math.cos(angle);
+        const sin = Math.sin(angle);
+        return {
+            x: x * cos - y * sin,
+            y: x * sin + y * cos,
+        };
+    }
+
+    function getPlacementById(id) {
+        return placements.find(item => item.id === id) || null;
+    }
 
     function resizeCanvas() {
         const rect = canvas.getBoundingClientRect();
@@ -365,32 +419,161 @@ def _designer(board: BoardSpecification, placements: List[Dict[str, object]]) ->
         drawPlacements();
     }
 
-    function connectionPoints(placement) {
+    function endpointGeometry(placement) {
         const piece = libraryByCode[placement.code];
         if (!piece) { return []; }
-        const rotation = (placement.rotation || 0) * Math.PI / 180;
+        const rotation = toRadians(placement.rotation || 0);
+        const flipped = placement.flipped ? -1 : 1;
+
         if (piece.kind === 'curve' && piece.radius && piece.angle) {
-            const halfTheta = (piece.angle * Math.PI / 180) / 2;
-            const startAngle = rotation + halfTheta;
-            const endAngle = rotation - halfTheta;
-            return [
-                {
-                    x: placement.x + piece.radius * Math.cos(startAngle),
-                    y: placement.y + piece.radius * Math.sin(startAngle),
-                },
-                {
-                    x: placement.x + piece.radius * Math.cos(endAngle),
-                    y: placement.y + piece.radius * Math.sin(endAngle),
-                },
-            ];
+            const halfTheta = toRadians(piece.angle) / 2;
+            const orientation = flipped;
+            const baseAngles = [halfTheta, -halfTheta];
+            return baseAngles.map(baseAngle => {
+                const angleLocal = baseAngle * orientation;
+                const localPosition = {
+                    x: piece.radius * Math.cos(angleLocal),
+                    y: piece.radius * Math.sin(angleLocal),
+                };
+                const rotated = rotatePoint(localPosition.x, localPosition.y, rotation);
+                const tangentVector = {
+                    x: -Math.sin(angleLocal) * orientation,
+                    y: Math.cos(angleLocal) * orientation,
+                };
+                const tangentLocalAngle = Math.atan2(tangentVector.y, tangentVector.x);
+                return {
+                    x: placement.x + rotated.x,
+                    y: placement.y + rotated.y,
+                    tangent: normalizeRadians(tangentLocalAngle + rotation),
+                    localPosition,
+                    localTangent: tangentLocalAngle,
+                };
+            });
         }
+
         const displayLength = piece.displayLength || piece.length || 0;
-        const dx = (displayLength / 2) * Math.cos(rotation);
-        const dy = (displayLength / 2) * Math.sin(rotation);
-        return [
-            { x: placement.x + dx, y: placement.y + dy },
-            { x: placement.x - dx, y: placement.y - dy },
+        const halfLength = displayLength / 2;
+        const endpoints = [
+            {
+                localPosition: { x: halfLength, y: 0 },
+                localTangent: 0,
+            },
+            {
+                localPosition: { x: -halfLength, y: 0 },
+                localTangent: Math.PI,
+            },
         ];
+        return endpoints.map(endpoint => {
+            const rotated = rotatePoint(endpoint.localPosition.x, endpoint.localPosition.y, rotation);
+            return {
+                x: placement.x + rotated.x,
+                y: placement.y + rotated.y,
+                tangent: normalizeRadians(endpoint.localTangent + rotation),
+                localPosition: endpoint.localPosition,
+                localTangent: endpoint.localTangent,
+            };
+        });
+    }
+
+    function connectionPoints(placement) {
+        return endpointGeometry(placement).map(endpoint => ({ x: endpoint.x, y: endpoint.y }));
+    }
+
+    function endpointsAreConnected(endpointA, endpointB) {
+        const dx = endpointA.x - endpointB.x;
+        const dy = endpointA.y - endpointB.y;
+        const distance = Math.hypot(dx, dy);
+        if (distance > CONNECTION_TOLERANCE_MM) {
+            return false;
+        }
+        const angleDiff = Math.abs(normalizeRadians(endpointA.tangent - endpointB.tangent));
+        return Math.abs(angleDiff - Math.PI) < ANGLE_TOLERANCE_RAD;
+    }
+
+    function connectedSectionIds(originId) {
+        const visited = new Set();
+        const queue = [originId];
+        while (queue.length) {
+            const currentId = queue.shift();
+            if (!currentId || visited.has(currentId)) {
+                continue;
+            }
+            visited.add(currentId);
+            const placement = getPlacementById(currentId);
+            if (!placement) { continue; }
+            const endpoints = endpointGeometry(placement);
+            placements.forEach(other => {
+                if (other.id === currentId || visited.has(other.id)) { return; }
+                const otherEndpoints = endpointGeometry(other);
+                for (let i = 0; i < endpoints.length; i += 1) {
+                    for (let j = 0; j < otherEndpoints.length; j += 1) {
+                        if (endpointsAreConnected(endpoints[i], otherEndpoints[j])) {
+                            queue.push(other.id);
+                            return;
+                        }
+                    }
+                }
+            });
+        }
+        return Array.from(visited);
+    }
+
+    function applySectionTransform(sectionIds, pivotPoint, deltaRotationDeg, deltaX, deltaY) {
+        const rotationRad = toRadians(deltaRotationDeg);
+        const cos = Math.cos(rotationRad);
+        const sin = Math.sin(rotationRad);
+        sectionIds.forEach(id => {
+            const piece = getPlacementById(id);
+            if (!piece) { return; }
+            if (deltaRotationDeg) {
+                const relX = piece.x - pivotPoint.x;
+                const relY = piece.y - pivotPoint.y;
+                const rotatedX = relX * cos - relY * sin;
+                const rotatedY = relX * sin + relY * cos;
+                piece.x = pivotPoint.x + rotatedX;
+                piece.y = pivotPoint.y + rotatedY;
+                piece.rotation = (piece.rotation + deltaRotationDeg + 360) % 360;
+            }
+            piece.x += deltaX;
+            piece.y += deltaY;
+        });
+    }
+
+    function findBestSnapTransform(placement) {
+        const endpoints = endpointGeometry(placement);
+        let best = null;
+        placements.forEach(other => {
+            if (other.id === placement.id) { return; }
+            const otherEndpoints = endpointGeometry(other);
+            endpoints.forEach(endpoint => {
+                otherEndpoints.forEach(target => {
+                    const dx = endpoint.x - target.x;
+                    const dy = endpoint.y - target.y;
+                    const distance = Math.hypot(dx, dy);
+                    if (distance > SNAP_DISTANCE_MM) { return; }
+                    const angleDiff = Math.abs(normalizeRadians(endpoint.tangent - target.tangent));
+                    if (Math.abs(angleDiff - Math.PI) >= ANGLE_TOLERANCE_RAD) { return; }
+                    if (best && distance >= best.distance) { return; }
+                    const desiredTangent = normalizeRadians(target.tangent + Math.PI);
+                    const deltaRotationRad = normalizeRadians(desiredTangent - endpoint.tangent);
+                    const deltaRotationDeg = normalizeDegrees(toDegrees(deltaRotationRad));
+                    const newRotationDeg = (placement.rotation + deltaRotationDeg + 360) % 360;
+                    const newRotationRad = toRadians(newRotationDeg);
+                    const rotatedLocal = rotatePoint(endpoint.localPosition.x, endpoint.localPosition.y, newRotationRad);
+                    const newCenterX = target.x - rotatedLocal.x;
+                    const newCenterY = target.y - rotatedLocal.y;
+                    const deltaX = newCenterX - placement.x;
+                    const deltaY = newCenterY - placement.y;
+                    best = {
+                        distance,
+                        deltaRotationDeg,
+                        deltaX,
+                        deltaY,
+                    };
+                });
+            });
+        });
+        return best;
     }
 
     function emitState() {
@@ -433,6 +616,8 @@ def _designer(board: BoardSpecification, placements: List[Dict[str, object]]) ->
         };
         placements.push(newPlacement);
         selectedId = newPlacement.id;
+        activeSectionIds = null;
+        sectionInitialPositions.clear();
         updateSelectionLabel();
         draw();
         emitState();
@@ -474,10 +659,21 @@ def _designer(board: BoardSpecification, placements: List[Dict[str, object]]) ->
             dragOffset = { x: x - found.x, y: y - found.y };
             dragging = true;
             canvas.setPointerCapture(event.pointerId);
+            const sectionIds = sectionMode ? connectedSectionIds(found.id) : [found.id];
+            activeSectionIds = new Set(sectionIds);
+            sectionInitialPositions.clear();
+            sectionIds.forEach(id => {
+                const piece = getPlacementById(id);
+                if (piece) {
+                    sectionInitialPositions.set(id, { x: piece.x, y: piece.y });
+                }
+            });
             updateSelectionLabel();
             draw();
         } else {
             selectedId = null;
+            activeSectionIds = null;
+            sectionInitialPositions.clear();
             updateSelectionLabel();
             draw();
         }
@@ -485,17 +681,40 @@ def _designer(board: BoardSpecification, placements: List[Dict[str, object]]) ->
 
     canvas.addEventListener('pointermove', event => {
         if (!dragging || !selectedId) { return; }
-        const placement = placements.find(p => p.id === selectedId);
+        const placement = getPlacementById(selectedId);
         if (!placement) { return; }
         const rect = canvas.getBoundingClientRect();
         const { x, y } = canvasToMm(event.clientX - rect.left, event.clientY - rect.top);
-        placement.x = x - dragOffset.x;
-        placement.y = y - dragOffset.y;
+        const initial = sectionInitialPositions.get(selectedId) || { x: placement.x, y: placement.y };
+        const targetX = x - dragOffset.x;
+        const targetY = y - dragOffset.y;
+        const deltaX = targetX - initial.x;
+        const deltaY = targetY - initial.y;
+        const ids = activeSectionIds ? Array.from(activeSectionIds) : [selectedId];
+        ids.forEach(id => {
+            const piece = getPlacementById(id);
+            const start = sectionInitialPositions.get(id);
+            if (!piece || !start) { return; }
+            piece.x = start.x + deltaX;
+            piece.y = start.y + deltaY;
+        });
         draw();
     });
 
     canvas.addEventListener('pointerup', event => {
         dragging = false;
+        activeSectionIds = null;
+        sectionInitialPositions.clear();
+        if (canvas.hasPointerCapture(event.pointerId)) {
+            canvas.releasePointerCapture(event.pointerId);
+        }
+        emitState();
+    });
+
+    canvas.addEventListener('pointercancel', event => {
+        dragging = false;
+        activeSectionIds = null;
+        sectionInitialPositions.clear();
         if (canvas.hasPointerCapture(event.pointerId)) {
             canvas.releasePointerCapture(event.pointerId);
         }
@@ -521,11 +740,11 @@ def _designer(board: BoardSpecification, placements: List[Dict[str, object]]) ->
     }
 
     function adjustSelected(deltaRotation = 0, deltaX = 0, deltaY = 0) {
-        const placement = placements.find(p => p.id === selectedId);
+        const placement = getPlacementById(selectedId);
         if (!placement) { return; }
-        placement.rotation = (placement.rotation + deltaRotation + 360) % 360;
-        placement.x += deltaX;
-        placement.y += deltaY;
+        const pivot = { x: placement.x, y: placement.y };
+        const sectionIds = sectionMode ? connectedSectionIds(selectedId) : [selectedId];
+        applySectionTransform(sectionIds, pivot, deltaRotation, deltaX, deltaY);
         draw();
         emitState();
     }
@@ -537,26 +756,70 @@ def _designer(board: BoardSpecification, placements: List[Dict[str, object]]) ->
     document.getElementById('nudgeLeft').addEventListener('click', () => adjustSelected(0, -10, 0));
     document.getElementById('nudgeRight').addEventListener('click', () => adjustSelected(0, 10, 0));
     document.getElementById('flipPiece').addEventListener('click', () => {
-        const placement = placements.find(p => p.id === selectedId);
+        const placement = getPlacementById(selectedId);
         if (!placement) { return; }
         placement.flipped = !placement.flipped;
         draw();
         emitState();
     });
+
     document.getElementById('snapGrid').addEventListener('click', () => {
-        const placement = placements.find(p => p.id === selectedId);
+        const placement = getPlacementById(selectedId);
         if (!placement) { return; }
-        placement.x = Math.round(placement.x / 10) * 10;
-        placement.y = Math.round(placement.y / 10) * 10;
-        placement.rotation = Math.round(placement.rotation / 15) * 15;
+        const targetX = Math.round(placement.x / 10) * 10;
+        const targetY = Math.round(placement.y / 10) * 10;
+        const targetRotation = Math.round((placement.rotation || 0) / 15) * 15;
+        const deltaX = targetX - placement.x;
+        const deltaY = targetY - placement.y;
+        const deltaRotation = normalizeDegrees(targetRotation - (placement.rotation || 0));
+        const pivot = { x: placement.x, y: placement.y };
+        const sectionIds = sectionMode ? connectedSectionIds(selectedId) : [selectedId];
+        applySectionTransform(sectionIds, pivot, deltaRotation, deltaX, deltaY);
+        const updatedPlacement = getPlacementById(selectedId);
+        if (updatedPlacement) {
+            updatedPlacement.rotation = ((targetRotation % 360) + 360) % 360;
+        }
         draw();
         emitState();
     });
+
+    document.getElementById('snapPiece').addEventListener('click', () => {
+        const placement = getPlacementById(selectedId);
+        if (!placement) { return; }
+        const transform = findBestSnapTransform(placement);
+        if (!transform) { return; }
+        const pivot = { x: placement.x, y: placement.y };
+        const sectionIds = sectionMode ? connectedSectionIds(selectedId) : [selectedId];
+        applySectionTransform(sectionIds, pivot, transform.deltaRotationDeg, transform.deltaX, transform.deltaY);
+        draw();
+        emitState();
+    });
+
+    const sectionToggleButton = document.getElementById('toggleSectionMode');
+
+    function updateSectionToggleButton() {
+        if (!sectionToggleButton) { return; }
+        sectionToggleButton.textContent = sectionMode ? 'Section move: On' : 'Section move: Off';
+        sectionToggleButton.classList.toggle('primary', sectionMode);
+    }
+
+    if (sectionToggleButton) {
+        sectionToggleButton.addEventListener('click', () => {
+            sectionMode = !sectionMode;
+            if (!sectionMode) {
+                activeSectionIds = null;
+                sectionInitialPositions.clear();
+            }
+            updateSectionToggleButton();
+        });
+    }
     document.getElementById('deletePiece').addEventListener('click', () => {
         const index = placements.findIndex(p => p.id === selectedId);
         if (index === -1) { return; }
         placements.splice(index, 1);
         selectedId = placements.length ? placements[placements.length - 1].id : null;
+        activeSectionIds = null;
+        sectionInitialPositions.clear();
         updateSelectionLabel();
         draw();
         emitState();
@@ -565,6 +828,7 @@ def _designer(board: BoardSpecification, placements: List[Dict[str, object]]) ->
     window.addEventListener('resize', resizeCanvas);
     resizeCanvas();
     updateSelectionLabel();
+    updateSectionToggleButton();
     requestFrameHeight();
     </script>
     """
