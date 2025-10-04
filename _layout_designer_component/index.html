@@ -1194,6 +1194,36 @@
     canvas.addEventListener('pointerdown', event => {
         const rect = canvas.getBoundingClientRect();
         const { x, y } = canvasToMm(event.clientX - rect.left, event.clientY - rect.top);
+
+        let foundPlacement = null;
+        for (let i = placements.length - 1; i >= 0; i -= 1) {
+            if (hitTest(placements[i], x, y)) {
+                foundPlacement = placements[i];
+                break;
+            }
+        }
+
+        if (foundPlacement) {
+            selectedId = foundPlacement.id;
+            selectedCircleId = null;
+            dragOffset = { x: x - foundPlacement.x, y: y - foundPlacement.y };
+            dragging = true;
+            viewPanning = false;
+            canvas.setPointerCapture(event.pointerId);
+            const sectionIds = sectionMode ? connectedSectionIds(foundPlacement.id) : [foundPlacement.id];
+            activeSectionIds = new Set(sectionIds);
+            sectionInitialPositions.clear();
+            sectionIds.forEach(id => {
+                const piece = getPlacementById(id);
+                if (piece) {
+                    sectionInitialPositions.set(id, { x: piece.x, y: piece.y });
+                }
+            });
+            updateSelectionLabel();
+            draw();
+            return;
+        }
+
         for (let i = guideCircles.length - 1; i >= 0; i -= 1) {
             const circle = guideCircles[i];
             const distance = Math.hypot(x - circle.x, y - circle.y);
@@ -1209,47 +1239,21 @@
                 return;
             }
         }
-        let found = null;
-        for (let i = placements.length - 1; i >= 0; i -= 1) {
-            if (hitTest(placements[i], x, y)) {
-                found = placements[i];
-                break;
-            }
-        }
-        if (found) {
-            selectedId = found.id;
-            selectedCircleId = null;
-            dragOffset = { x: x - found.x, y: y - found.y };
-            dragging = true;
-            viewPanning = false;
+
+        selectedId = null;
+        selectedCircleId = null;
+        activeSectionIds = null;
+        sectionInitialPositions.clear();
+        viewPanning = false;
+        updateSelectionLabel();
+        if (event.button === 0) {
+            viewPanning = true;
+            panPointerStart = { x: event.clientX, y: event.clientY };
+            panStart = { x: pan.x, y: pan.y };
             canvas.setPointerCapture(event.pointerId);
-            const sectionIds = sectionMode ? connectedSectionIds(found.id) : [found.id];
-            activeSectionIds = new Set(sectionIds);
-            sectionInitialPositions.clear();
-            sectionIds.forEach(id => {
-                const piece = getPlacementById(id);
-                if (piece) {
-                    sectionInitialPositions.set(id, { x: piece.x, y: piece.y });
-                }
-            });
-            updateSelectionLabel();
-            draw();
-        } else {
-            selectedId = null;
-            selectedCircleId = null;
-            activeSectionIds = null;
-            sectionInitialPositions.clear();
-            viewPanning = false;
-            updateSelectionLabel();
-            if (event.button === 0) {
-                viewPanning = true;
-                panPointerStart = { x: event.clientX, y: event.clientY };
-                panStart = { x: pan.x, y: pan.y };
-                canvas.setPointerCapture(event.pointerId);
-                event.preventDefault();
-            }
-            draw();
+            event.preventDefault();
         }
+        draw();
     });
 
     canvas.addEventListener('pointermove', event => {
