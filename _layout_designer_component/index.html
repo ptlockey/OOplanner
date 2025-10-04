@@ -382,6 +382,9 @@
 
     const padding = 60;
     const EXPANDED_SECTIONS_STORAGE_KEY = 'layoutDesignerExpandedSections';
+    const GUIDE_CIRCLE_HANDLE_MIN_RADIUS_MM = 8;
+    const GUIDE_CIRCLE_HANDLE_MAX_RADIUS_MM = 24;
+    const GUIDE_CIRCLE_HANDLE_RADIUS_RATIO = 0.35;
 
     function loadExpandedSections() {
         const globalStore = window.__layoutDesignerExpandedSections;
@@ -656,6 +659,15 @@
     const CONNECTION_TOLERANCE_MM = 3;
     const ANGLE_TOLERANCE_RAD = Math.PI / 36;
 
+    function getGuideCircleHandleRadiusMm(circle) {
+        if (!circle || typeof circle.radius !== 'number') {
+            return GUIDE_CIRCLE_HANDLE_MIN_RADIUS_MM;
+        }
+        const scaledRadius = circle.radius * GUIDE_CIRCLE_HANDLE_RADIUS_RATIO;
+        const boundedRadius = Math.min(Math.max(scaledRadius, GUIDE_CIRCLE_HANDLE_MIN_RADIUS_MM), GUIDE_CIRCLE_HANDLE_MAX_RADIUS_MM);
+        return boundedRadius;
+    }
+
     function updateBoardOrientationLabel() {
         if (!orientationLabel) { return; }
         const value = ((boardOrientation % 360) + 360) % 360;
@@ -862,22 +874,35 @@
         guideCircles.forEach(circle => {
             const { x, y, scale } = mmToCanvas(circle.x, circle.y);
             const radiusPx = circle.radius * scale;
+            const handleColor = circle.color || '#ff7f0e';
+            const handleRadiusMm = getGuideCircleHandleRadiusMm(circle);
+            const handleRadiusPx = Math.max(handleRadiusMm * scale, 6);
             ctx.save();
             ctx.beginPath();
             ctx.setLineDash([10, 6]);
             ctx.lineWidth = circle.id === selectedCircleId ? 3 : 2;
-            ctx.strokeStyle = circle.color || '#ff7f0e';
+            ctx.strokeStyle = handleColor;
             ctx.arc(x, y, radiusPx, 0, Math.PI * 2);
             ctx.stroke();
             ctx.setLineDash([]);
-            ctx.fillStyle = circle.color || '#ff7f0e';
-            ctx.globalAlpha = 0.12;
+            ctx.globalAlpha = 0.16;
+            ctx.fillStyle = handleColor;
             ctx.beginPath();
-            ctx.arc(x, y, 8, 0, Math.PI * 2);
+            ctx.arc(x, y, handleRadiusPx, 0, Math.PI * 2);
             ctx.fill();
             ctx.globalAlpha = 1;
             ctx.beginPath();
-            ctx.arc(x, y, 4, 0, Math.PI * 2);
+            ctx.lineWidth = 1.5;
+            ctx.strokeStyle = handleColor;
+            ctx.arc(x, y, handleRadiusPx, 0, Math.PI * 2);
+            ctx.stroke();
+            ctx.beginPath();
+            ctx.fillStyle = '#ffffff';
+            ctx.arc(x, y, Math.max(handleRadiusPx * 0.45, 2), 0, Math.PI * 2);
+            ctx.fill();
+            ctx.beginPath();
+            ctx.fillStyle = handleColor;
+            ctx.arc(x, y, Math.max(handleRadiusPx * 0.2, 3), 0, Math.PI * 2);
             ctx.fill();
             ctx.restore();
         });
@@ -1342,7 +1367,8 @@
         for (let i = guideCircles.length - 1; i >= 0; i -= 1) {
             const circle = guideCircles[i];
             const distance = Math.hypot(x - circle.x, y - circle.y);
-            if (distance <= circle.radius) {
+            const handleRadius = getGuideCircleHandleRadiusMm(circle);
+            if (distance <= handleRadius) {
                 selectedCircleId = circle.id;
                 selectedId = null;
                 draggingCircleId = circle.id;
