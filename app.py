@@ -243,16 +243,38 @@ def _designer(
         for piece in library.values()
     ]
 
-    library_cards = []
+    category_specs = [
+        ("Straights & Flex", {"straight", "flex"}),
+        ("Curves", {"curve"}),
+        ("Points & Turnouts", {"point"}),
+        ("Special Pieces", None),
+    ]
+
+    categorized_items = {name: [] for name, _ in category_specs}
+    fallback_category = next((name for name, kinds in category_specs if kinds is None), category_specs[-1][0])
+
     for item in track_payload:
+        assigned_category: Optional[str] = None
+        item_kind = item.get("kind")
+        for name, kinds in category_specs:
+            if kinds is None:
+                continue
+            if item_kind in kinds:
+                assigned_category = name
+                break
+        if assigned_category is None:
+            assigned_category = fallback_category
+        categorized_items.setdefault(assigned_category, []).append(item)
+
+    def _render_library_card(item: Dict[str, object]) -> str:
         extra_controls = ""
-        if item["kind"] == "curve" and item.get("radius"):
+        if item.get("kind") == "curve" and item.get("radius"):
             extra_controls = (
                 f"<button data-radius=\"{item['radius']}\" data-label=\"{item['code']} ({item['radius']:.0f} mm)\" "
                 "class=\"add-circle\">Add guide circle</button>"
             )
         radius_fragment = f" · Radius {item['radius']:.0f} mm" if item.get("radius") else ""
-        card = (
+        return (
             "<div class=\"library-item\">"
             f"<div class=\"library-heading\"><strong>{item['code']}</strong><span>{item['name']}</span></div>"
             f"<small>{item['kind'].title()} · {item['displayLength']:.0f} mm{radius_fragment}</small>"
@@ -262,7 +284,23 @@ def _designer(
             "</div>"
             "</div>"
         )
-        library_cards.append(card)
+
+    library_sections: List[str] = []
+    first_open = True
+    for name, _ in category_specs:
+        items = categorized_items.get(name, [])
+        if not items:
+            continue
+        cards_html = "".join(_render_library_card(item) for item in items)
+        open_attr = " open" if first_open else ""
+        first_open = False
+        section_html = (
+            f"<details class=\"library-section\"{open_attr}>"
+            f"<summary><span class=\"label\">{name}</span><span class=\"count\">{len(items)}</span></summary>"
+            f"<div class=\"library-grid\">{cards_html}</div>"
+            "</details>"
+        )
+        library_sections.append(section_html)
 
     html_template = Template(
         """
@@ -420,9 +458,61 @@ def _designer(
         margin: 0;
         font-size: 1.1rem;
     }
-    .library-grid {
+    .library-sections {
+        display: flex;
+        flex-direction: column;
+        gap: 0.75rem;
+    }
+    .library-section {
+        border: 1px solid #d0d0d0;
+        border-radius: 0.65rem;
+        background: #ffffff;
+        overflow: hidden;
+    }
+    .library-section summary {
+        cursor: pointer;
+        list-style: none;
+        padding: 0.75rem 0.95rem;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.75rem;
+        font-weight: 600;
+        background: linear-gradient(180deg, rgba(238, 241, 245, 0.75) 0%, rgba(222, 228, 237, 0.75) 100%);
+    }
+    .library-section summary .label {
+        color: #2f3b52;
+        font-size: 0.95rem;
+    }
+    .library-section summary::after {
+        content: "▾";
+        font-size: 0.9rem;
+        color: #4d5b75;
+        margin-left: auto;
+        transition: transform 0.2s ease;
+    }
+    .library-section summary::-webkit-details-marker {
+        display: none;
+    }
+    .library-section summary .count {
+        font-size: 0.85rem;
+        color: #4d5b75;
+        background: rgba(79, 129, 189, 0.16);
+        padding: 0.1rem 0.5rem;
+        border-radius: 999px;
+        font-weight: 600;
+    }
+    .library-section[open] summary {
+        background: linear-gradient(180deg, rgba(219, 229, 241, 0.9) 0%, rgba(206, 219, 236, 0.9) 100%);
+        border-bottom: 1px solid #d0d0d0;
+    }
+    .library-section[open] summary::after {
+        transform: rotate(180deg);
+    }
+    .library-section .library-grid {
+        padding: 0.9rem;
         display: grid;
-        gap: 0.5rem;
+        gap: 0.6rem;
         grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
     }
     .library-item {
@@ -574,7 +664,7 @@ def _designer(
         <aside class="library-panel">
             <h3>Track library and curve guides</h3>
             <p class="hint">Click "Add to board" to drop a piece. Curved pieces also offer a planning circle that you can drag on the board.</p>
-            <div class="library-grid">$library_cards</div>
+            <div class="library-sections">$library_sections</div>
             <div class="circle-panel">
                 <h4>Planning circles</h4>
                 <p class="hint">Drag circles on the canvas to position them. Use them to visualise curve radii and loops.</p>
@@ -1800,7 +1890,7 @@ def _designer(
     )
 
     html = html_template.substitute(
-        library_cards="".join(library_cards),
+        library_sections="".join(library_sections),
         board_json=json.dumps(board_payload),
         track_json=json.dumps(track_payload),
         placements_json=json.dumps(placements),
