@@ -771,7 +771,7 @@
             const rotation = (placement.rotation || 0) * Math.PI / 180;
             const selected = placement.id === selectedId;
             const displayLength = piece.displayLength || piece.length || 0;
-            const trackWidth = 32 * scale;
+            const trackWidth = Math.max(32 * scale, 4);
             ctx.save();
             ctx.translate(x, y);
             ctx.rotate(-rotation);
@@ -788,7 +788,7 @@
                 ctx.beginPath();
                 ctx.fillStyle = selected ? '#ffe5d1' : '#dce9ff';
                 ctx.strokeStyle = selected ? '#d62728' : '#1f77b4';
-                ctx.lineWidth = 2;
+                ctx.lineWidth = Math.max(2, trackWidth / 8);
                 ctx.rect(-halfLength, -trackWidth / 2, halfLength * 2, trackWidth);
                 ctx.fill();
                 ctx.stroke();
