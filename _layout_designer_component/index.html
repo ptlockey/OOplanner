@@ -381,6 +381,42 @@
     const componentId = queryParams.get('componentId');
 
     const padding = 60;
+    const EXPANDED_SECTIONS_STORAGE_KEY = 'layoutDesignerExpandedSections';
+
+    function loadExpandedSections() {
+        const globalStore = window.__layoutDesignerExpandedSections;
+        if (globalStore instanceof Set) {
+            return globalStore;
+        }
+        let fromStorage = null;
+        try {
+            const stored = window.localStorage && window.localStorage.getItem(EXPANDED_SECTIONS_STORAGE_KEY);
+            if (stored) {
+                const parsed = JSON.parse(stored);
+                if (Array.isArray(parsed)) {
+                    fromStorage = new Set(parsed.map(value => String(value)));
+                }
+            }
+        } catch (error) {
+            fromStorage = null;
+        }
+        const initial = fromStorage instanceof Set ? fromStorage : new Set();
+        window.__layoutDesignerExpandedSections = initial;
+        return initial;
+    }
+
+    const expandedLibrarySections = loadExpandedSections();
+
+    function persistExpandedSections() {
+        try {
+            if (window.localStorage) {
+                const payload = JSON.stringify(Array.from(expandedLibrarySections));
+                window.localStorage.setItem(EXPANDED_SECTIONS_STORAGE_KEY, payload);
+            }
+        } catch (error) {
+            // Ignore persistence errors (e.g., private mode restrictions)
+        }
+    }
 
     function clonePoint(point) {
         if (Array.isArray(point) && point.length >= 2) {
@@ -436,6 +472,7 @@
             byName.get(target.name).items.push(item);
         });
         let markup = '';
+        const shouldDefaultOpenFirst = expandedLibrarySections.size === 0;
         let firstOpen = true;
         categories.forEach(spec => {
             const entry = byName.get(spec.name);
@@ -459,9 +496,13 @@
                     `</div>`
                 );
             }).join('');
-            const openAttr = firstOpen ? ' open' : '';
+            const isOpen = expandedLibrarySections.has(spec.name) || (shouldDefaultOpenFirst && firstOpen);
+            const openAttr = isOpen ? ' open' : '';
+            if (isOpen) {
+                expandedLibrarySections.add(spec.name);
+            }
             firstOpen = false;
-            markup += `<details class="library-section"${openAttr}>` +
+            markup += `<details class="library-section" data-section="${spec.name}"${openAttr}>` +
                 `<summary><span class="label">${spec.name}</span><span class="count">${entry.items.length}</span></summary>` +
                 `<div class="library-grid">${cards}</div>` +
                 `</details>`;
@@ -471,9 +512,19 @@
             return;
         }
         container.innerHTML = markup;
+        persistExpandedSections();
         requestFrameHeight();
         container.querySelectorAll('.library-section').forEach(section => {
             section.addEventListener('toggle', () => {
+                const sectionName = section.getAttribute('data-section');
+                if (sectionName) {
+                    if (section.open) {
+                        expandedLibrarySections.add(sectionName);
+                    } else {
+                        expandedLibrarySections.delete(sectionName);
+                    }
+                    persistExpandedSections();
+                }
                 requestAnimationFrame(() => requestFrameHeight());
             });
         });
