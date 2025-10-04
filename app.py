@@ -271,7 +271,7 @@ def _designer(
         color-scheme: light;
     }
     html, body {
-        height: 100%;
+        min-height: 100vh;
     }
     body {
         margin: 0;
@@ -281,7 +281,6 @@ def _designer(
         justify-content: center;
         padding: 1.5rem;
         box-sizing: border-box;
-        overflow: hidden;
     }
     .designer-wrapper {
         display: grid;
@@ -290,15 +289,15 @@ def _designer(
         align-items: stretch;
         width: 100%;
         max-width: 1480px;
-        height: 100%;
-        overflow: hidden;
+        flex: 1 1 auto;
+        min-height: 0;
+        overflow: visible;
     }
     .board-column {
         display: flex;
         flex-direction: column;
         gap: 1rem;
-        height: 100%;
-        overflow: hidden;
+        flex: 1 1 auto;
         min-height: 0;
     }
     .board-canvas {
@@ -317,7 +316,6 @@ def _designer(
         min-height: 580px;
         height: min(900px, 72vh);
         flex: 1;
-        min-height: 0;
         box-shadow: 0 10px 28px rgba(31, 55, 90, 0.12);
     }
     #boardCanvas {
