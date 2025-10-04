@@ -228,6 +228,7 @@ def _designer(
     board_payload = {
         "polygon": board_polygon,
         "description": describe_board(board),
+        "orientation": float(st.session_state.get("board_orientation", 0.0)),
     }
     track_payload = [
         {
@@ -266,22 +267,46 @@ def _designer(
     html_template = Template(
         """
     <style>
+    :root {
+        color-scheme: light;
+    }
+    html, body {
+        height: 100%;
+    }
+    body {
+        margin: 0;
+        font-family: 'Source Sans Pro', sans-serif;
+        background: linear-gradient(180deg, #eef1f5 0%, #e2e7f0 100%);
+        display: flex;
+        justify-content: center;
+        padding: 1.5rem;
+        box-sizing: border-box;
+        overflow: hidden;
+    }
     .designer-wrapper {
         display: grid;
         grid-template-columns: minmax(0, 2.2fr) minmax(280px, 1fr);
         gap: 1.25rem;
-        align-items: flex-start;
-        font-family: 'Source Sans Pro', sans-serif;
+        align-items: stretch;
+        width: 100%;
+        max-width: 1480px;
+        height: 100%;
+        overflow: hidden;
     }
     .board-column {
         display: flex;
         flex-direction: column;
         gap: 1rem;
+        height: 100%;
+        overflow: hidden;
+        min-height: 0;
     }
     .board-canvas {
         display: flex;
         flex-direction: column;
         gap: 0.75rem;
+        flex: 1;
+        min-height: 0;
     }
     .board-surface {
         position: relative;
@@ -291,6 +316,9 @@ def _designer(
         overflow: hidden;
         min-height: 580px;
         height: min(900px, 72vh);
+        flex: 1;
+        min-height: 0;
+        box-shadow: 0 10px 28px rgba(31, 55, 90, 0.12);
     }
     #boardCanvas {
         width: 100%;
@@ -298,13 +326,15 @@ def _designer(
         touch-action: none;
         display: block;
     }
-    .view-controls {
+    .view-controls,
+    .board-controls {
         display: flex;
         flex-wrap: wrap;
         gap: 0.5rem;
         align-items: center;
     }
-    .view-controls label {
+    .view-controls label,
+    .board-controls span.label {
         font-weight: 600;
         font-size: 0.9rem;
     }
@@ -312,17 +342,25 @@ def _designer(
         flex: 1;
         min-width: 160px;
     }
-    .view-controls span {
+    .view-controls span,
+    .board-controls span.value {
         min-width: 3rem;
         text-align: right;
         font-variant-numeric: tabular-nums;
     }
-    .view-controls button {
+    .view-controls button,
+    .board-controls button {
         padding: 0.3rem 0.75rem;
         border-radius: 0.4rem;
         border: 1px solid #666666;
         background: #f8f8f8;
         cursor: pointer;
+    }
+    .board-controls {
+        justify-content: flex-start;
+    }
+    .board-controls span.value {
+        font-weight: 600;
     }
     .piece-controls {
         display: flex;
@@ -377,7 +415,7 @@ def _designer(
         gap: 0.75rem;
         position: sticky;
         top: 0;
-        max-height: calc(100vh - 140px);
+        max-height: 100%;
         overflow: auto;
     }
     .library-panel h3 {
@@ -478,9 +516,17 @@ def _designer(
         font-size: 0.8rem;
     }
     @media (max-width: 1100px) {
+        body {
+            overflow: auto;
+            padding: 1rem;
+        }
         .designer-wrapper {
             display: flex;
             flex-direction: column;
+            height: auto;
+        }
+        .board-column {
+            height: auto;
         }
         .library-panel {
             position: static;
@@ -499,6 +545,12 @@ def _designer(
                     <input type="range" id="zoomSlider" min="0.4" max="3" step="0.01" value="1" />
                     <span id="zoomValue">100%</span>
                     <button id="resetView" type="button">Reset view</button>
+                </div>
+                <div class="board-controls">
+                    <span class="label">Board orientation</span>
+                    <button id="boardRotateLeft" type="button">↺ 90°</button>
+                    <button id="boardRotateRight" type="button">↻ 90°</button>
+                    <span class="value" id="boardOrientationLabel">0°</span>
                 </div>
                 <div class="piece-controls">
                     <span id="selectionLabel">No piece selected</span>
@@ -534,13 +586,17 @@ def _designer(
     </div>
     <script src="https://unpkg.com/streamlit-component-lib/dist/index.js"></script>
     <script>
-    const boardData = $board_json;
-    const trackLibrary = $track_json;
+    let boardData = $board_json;
+    let trackLibrary = $track_json;
     const initialPlacements = $placements_json;
     const initialCircles = $circles_json;
     const initialZoom = $initial_zoom_json;
-    const libraryByCode = Object.fromEntries(trackLibrary.map(item => [item.code, item]));
-    const placements = initialPlacements.map((item, idx) => ({
+    const colorPalette = ['#ff7f0e', '#9467bd', '#2ca02c', '#d62728', '#17becf', '#1f77b4'];
+    const queryParams = new URLSearchParams(window.location.search);
+    const componentId = queryParams.get('componentId');
+
+    let libraryByCode = Object.fromEntries(trackLibrary.map(item => [item.code, item]));
+    let placements = initialPlacements.map((item, idx) => ({
         id: item.id || ('placement-' + idx),
         code: item.code,
         x: typeof item.x === 'number' ? item.x : 0,
@@ -550,9 +606,56 @@ def _designer(
     }));
     let nextId = placements.length;
     let selectedId = placements.length ? placements[placements.length - 1].id : null;
-    const colorPalette = ['#ff7f0e', '#9467bd', '#2ca02c', '#d62728', '#17becf', '#1f77b4'];
-    const queryParams = new URLSearchParams(window.location.search);
-    const componentId = queryParams.get('componentId');
+
+    let boardOrientation = typeof boardData.orientation === 'number' ? boardData.orientation : 0;
+    const padding = 60;
+
+    function clonePoint(point) {
+        if (Array.isArray(point) && point.length >= 2) {
+            const x = Number(point[0]);
+            const y = Number(point[1]);
+            return [Number.isFinite(x) ? x : 0, Number.isFinite(y) ? y : 0];
+        }
+        if (point && typeof point === 'object') {
+            const x = Number(point.x);
+            const y = Number(point.y);
+            return [Number.isFinite(x) ? x : 0, Number.isFinite(y) ? y : 0];
+        }
+        return [0, 0];
+    }
+
+    function defaultPolygon() {
+        return [[0, 0], [2400, 0], [2400, 1200], [0, 1200]];
+    }
+
+    let polygon = (boardData.polygon && boardData.polygon.length ? boardData.polygon : defaultPolygon()).map(clonePoint);
+    let minX = 0;
+    let maxX = 0;
+    let minY = 0;
+    let maxY = 0;
+    let widthMm = 1;
+    let heightMm = 1;
+    let boardCenter = { x: 0, y: 0 };
+
+    function recalculateBoardGeometry() {
+        if (!polygon.length) {
+            polygon = defaultPolygon();
+        }
+        polygon = polygon.map(clonePoint);
+        const xs = polygon.map(pt => pt[0]);
+        const ys = polygon.map(pt => pt[1]);
+        minX = Math.min(...xs);
+        maxX = Math.max(...xs);
+        minY = Math.min(...ys);
+        maxY = Math.max(...ys);
+        widthMm = Math.max(maxX - minX, 1);
+        heightMm = Math.max(maxY - minY, 1);
+        boardCenter = { x: (minX + maxX) / 2, y: (minY + maxY) / 2 };
+        boardData.polygon = polygon.map(pt => pt.slice());
+        boardData.orientation = boardOrientation;
+    }
+
+    recalculateBoardGeometry();
 
     function postToStreamlit(type, payload = {}) {
         if (window.Streamlit) {
@@ -598,34 +701,30 @@ def _designer(
     const zoomSlider = document.getElementById('zoomSlider');
     const zoomValueLabel = document.getElementById('zoomValue');
     const resetViewButton = document.getElementById('resetView');
+    const orientationLabel = document.getElementById('boardOrientationLabel');
+    const rotateBoardLeftButton = document.getElementById('boardRotateLeft');
+    const rotateBoardRightButton = document.getElementById('boardRotateRight');
 
-    const polygon = boardData.polygon && boardData.polygon.length ? boardData.polygon : [
-        [0, 0], [2400, 0], [2400, 1200], [0, 1200]
-    ];
-    const xs = polygon.map(pt => pt[0]);
-    const ys = polygon.map(pt => pt[1]);
-    const minX = Math.min(...xs);
-    const maxX = Math.max(...xs);
-    const minY = Math.min(...ys);
-    const maxY = Math.max(...ys);
-    const widthMm = Math.max(maxX - minX, 1);
-    const heightMm = Math.max(maxY - minY, 1);
-    const padding = 60;
-    const boardCenter = { x: (minX + maxX) / 2, y: (minY + maxY) / 2 };
-    const guideCircles = initialCircles.map((circle, idx) => {
-        const radius = typeof circle.radius === 'number' ? circle.radius : 0;
-        if (!radius || radius <= 0) { return null; }
-        const x = typeof circle.x === 'number' ? circle.x : boardCenter.x;
-        const y = typeof circle.y === 'number' ? circle.y : boardCenter.y;
-        return {
-            id: circle.id || ('circle-' + idx),
-            radius,
-            x,
-            y,
-            color: typeof circle.color === 'string' && circle.color ? circle.color : colorPalette[nextCircleColor++ % colorPalette.length],
-            label: typeof circle.label === 'string' && circle.label ? circle.label : `Radius $${radius.toFixed(0)} mm`,
-        };
-    }).filter(Boolean);
+    function buildGuideCircleList(source) {
+        nextCircleColor = 0;
+        return (Array.isArray(source) ? source : []).map((circle, idx) => {
+            if (!circle || typeof circle !== 'object') { return null; }
+            const radius = typeof circle.radius === 'number' ? circle.radius : 0;
+            if (!radius || radius <= 0) { return null; }
+            const x = typeof circle.x === 'number' ? circle.x : boardCenter.x;
+            const y = typeof circle.y === 'number' ? circle.y : boardCenter.y;
+            return {
+                id: circle.id || ('circle-' + idx),
+                radius,
+                x,
+                y,
+                color: typeof circle.color === 'string' && circle.color ? circle.color : colorPalette[nextCircleColor++ % colorPalette.length],
+                label: typeof circle.label === 'string' && circle.label ? circle.label : `Radius $${radius.toFixed(0)} mm`,
+            };
+        }).filter(Boolean);
+    }
+
+    let guideCircles = buildGuideCircleList(initialCircles);
     let circleCounter = guideCircles.length;
     let selectedCircleId = guideCircles.length ? guideCircles[guideCircles.length - 1].id : null;
     let draggingCircleId = null;
@@ -633,6 +732,14 @@ def _designer(
     const SNAP_DISTANCE_MM = 200;
     const CONNECTION_TOLERANCE_MM = 3;
     const ANGLE_TOLERANCE_RAD = Math.PI / 36;
+
+    function updateBoardOrientationLabel() {
+        if (!orientationLabel) { return; }
+        const value = ((boardOrientation % 360) + 360) % 360;
+        orientationLabel.textContent = `$${Math.round(value)}°`;
+    }
+
+    updateBoardOrientationLabel();
 
     function toRadians(degrees) {
         return (degrees || 0) * Math.PI / 180;
@@ -1053,6 +1160,35 @@ def _designer(
         return best;
     }
 
+    function rotateBoard(deltaDegrees) {
+        if (!Number.isFinite(deltaDegrees)) { return; }
+        const radians = toRadians(deltaDegrees);
+        const centre = { x: boardCenter.x, y: boardCenter.y };
+        polygon = polygon.map(point => {
+            const rotated = rotatePoint(point[0] - centre.x, point[1] - centre.y, radians);
+            return [centre.x + rotated.x, centre.y + rotated.y];
+        });
+        placements.forEach(piece => {
+            const rotated = rotatePoint(piece.x - centre.x, piece.y - centre.y, radians);
+            piece.x = centre.x + rotated.x;
+            piece.y = centre.y + rotated.y;
+            piece.rotation = (piece.rotation + deltaDegrees + 360) % 360;
+        });
+        guideCircles.forEach(circle => {
+            const rotated = rotatePoint(circle.x - centre.x, circle.y - centre.y, radians);
+            circle.x = centre.x + rotated.x;
+            circle.y = centre.y + rotated.y;
+        });
+        boardOrientation = (boardOrientation + deltaDegrees) % 360;
+        recalculateBoardGeometry();
+        clampPan();
+        draw();
+        updateBoardOrientationLabel();
+        updateSelectionLabel();
+        renderCircleList();
+        emitState();
+    }
+
     function emitState() {
         const payload = {
             placements: placements.map(item => ({
@@ -1071,7 +1207,11 @@ def _designer(
                 color: circle.color,
                 label: circle.label,
             })),
-            board: boardData,
+            board: {
+                description: boardData.description,
+                polygon: polygon.map(pt => pt.slice()),
+                orientation: boardOrientation,
+            },
             zoom,
         };
         postToStreamlit("streamlit:setComponentValue", {
@@ -1090,15 +1230,21 @@ def _designer(
         return colour;
     }
 
+    function currentFrameHeight() {
+        const bodyHeight = document.body ? document.body.scrollHeight : 0;
+        const docHeight = document.documentElement ? document.documentElement.scrollHeight : 0;
+        return Math.max(bodyHeight, docHeight, window.innerHeight || 0);
+    }
+
     function requestFrameHeight() {
         postToStreamlit("streamlit:setFrameHeight", {
-            height: document.body.scrollHeight,
+            height: currentFrameHeight(),
         });
     }
 
     function announceReady() {
         postToStreamlit("streamlit:componentReady", {
-            height: document.body.scrollHeight,
+            height: currentFrameHeight(),
         });
     }
 
@@ -1120,6 +1266,72 @@ def _designer(
         updateSelectionLabel();
         draw();
         emitState();
+    }
+
+    function applyBoardPayload(payload, options = {}) {
+        if (!payload || typeof payload !== 'object') { return; }
+        const { recenter = false, emit = false } = options;
+        if (typeof payload.description === 'string') {
+            boardData.description = payload.description;
+        }
+        if (Array.isArray(payload.polygon) && payload.polygon.length) {
+            polygon = payload.polygon.map(clonePoint);
+        } else if (!polygon.length) {
+            polygon = defaultPolygon();
+        }
+        if (typeof payload.orientation === 'number') {
+            boardOrientation = payload.orientation;
+        }
+        recalculateBoardGeometry();
+        if (recenter) {
+            pan = { x: 0, y: 0 };
+        }
+        clampPan();
+        draw();
+        updateBoardOrientationLabel();
+        if (emit) {
+            emitState();
+        }
+    }
+
+    function applyRenderArgs(args) {
+        if (!args || typeof args !== 'object') { return; }
+        if (Array.isArray(args.library)) {
+            trackLibrary = args.library;
+            libraryByCode = Object.fromEntries(trackLibrary.map(item => [item.code, item]));
+        }
+        if (args.board) {
+            applyBoardPayload(args.board);
+        } else {
+            recalculateBoardGeometry();
+        }
+        if (Array.isArray(args.placements)) {
+            placements = args.placements.map((item, idx) => ({
+                id: item.id || ('placement-' + idx),
+                code: item.code,
+                x: typeof item.x === 'number' ? item.x : 0,
+                y: typeof item.y === 'number' ? item.y : 0,
+                rotation: typeof item.rotation === 'number' ? item.rotation : 0,
+                flipped: Boolean(item.flipped),
+            }));
+            nextId = placements.length;
+        }
+        if (Array.isArray(args.circles)) {
+            guideCircles = buildGuideCircleList(args.circles);
+            circleCounter = guideCircles.length;
+            selectedCircleId = guideCircles.length ? guideCircles[guideCircles.length - 1].id : null;
+        }
+        if (typeof args.zoom === 'number') {
+            zoom = Math.min(Math.max(args.zoom, MIN_ZOOM), MAX_ZOOM);
+            updateZoomUI();
+        }
+        selectedId = placements.length ? placements[placements.length - 1].id : null;
+        clampPan();
+        draw();
+        updateBoardOrientationLabel();
+        updateSelectionLabel();
+        renderCircleList();
+        requestFrameHeight();
     }
 
     function updateSelectionLabel() {
@@ -1181,6 +1393,13 @@ def _designer(
         resetViewButton.addEventListener('click', () => {
             resetView();
         });
+    }
+
+    if (rotateBoardLeftButton) {
+        rotateBoardLeftButton.addEventListener('click', () => rotateBoard(-90));
+    }
+    if (rotateBoardRightButton) {
+        rotateBoardRightButton.addEventListener('click', () => rotateBoard(90));
     }
 
     let dragging = false;
@@ -1555,6 +1774,19 @@ def _designer(
         });
     }
 
+    if (window.Streamlit && window.Streamlit.events && window.Streamlit.RENDER_EVENT) {
+        window.Streamlit.events.addEventListener(window.Streamlit.RENDER_EVENT, event => {
+            const detail = event && event.detail ? event.detail : {};
+            applyRenderArgs(detail.args || {});
+        });
+    } else {
+        window.addEventListener('message', event => {
+            if (event && event.data && event.data.type === 'streamlit:render') {
+                applyRenderArgs(event.data.args || {});
+            }
+        });
+    }
+
     window.addEventListener('resize', () => {
         resizeCanvas();
         requestFrameHeight();
@@ -1583,6 +1815,11 @@ def _designer(
         key="layout-designer",
         default=None,
         data_version=str(hash(html)),
+        board=board_payload,
+        library=track_payload,
+        placements=placements,
+        circles=circles,
+        zoom=current_zoom,
     )
     if component_value is None:
         return placements, circles, current_zoom
@@ -1597,6 +1834,12 @@ def _designer(
 
     if not isinstance(parsed, dict):
         return placements, circles, current_zoom
+
+    board_state = parsed.get("board")
+    if isinstance(board_state, dict):
+        orientation_value = board_state.get("orientation")
+        if isinstance(orientation_value, (int, float)):
+            st.session_state["board_orientation"] = float(orientation_value)
 
     payload = parsed.get("placements")
     zoom_value = parsed.get("zoom")
@@ -1640,6 +1883,9 @@ if "zoom" not in st.session_state:
 if "circles" not in st.session_state:
     st.session_state["circles"] = []
 
+if "board_orientation" not in st.session_state:
+    st.session_state["board_orientation"] = 0.0
+
 uploaded_layout = st.sidebar.file_uploader("Load layout JSON", type=["json"])
 if uploaded_layout is not None:
     try:
@@ -1655,6 +1901,12 @@ if uploaded_layout is not None:
         st.session_state["circles"] = loaded_circles
         if loaded_zoom is not None:
             st.session_state["zoom"] = loaded_zoom
+        if isinstance(parsed_payload, dict):
+            board_payload = parsed_payload.get("board")
+            if isinstance(board_payload, dict):
+                orientation_value = board_payload.get("orientation")
+                if isinstance(orientation_value, (int, float)):
+                    st.session_state["board_orientation"] = float(orientation_value)
         st.sidebar.success(f"Loaded {len(loaded_placements)} placement{'s' if len(loaded_placements) != 1 else ''} from layout.")
 
 placements: List[Dict[str, object]] = st.session_state["placements"]
@@ -1671,6 +1923,7 @@ layout_payload = {
     "board": {
         "description": describe_board(board),
         "polygon": board.polygon_points(),
+        "orientation": float(st.session_state.get("board_orientation", 0.0)),
     },
     "zoom": current_zoom,
 }
