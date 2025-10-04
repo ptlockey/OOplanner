@@ -1301,8 +1301,12 @@
     let viewPanning = false;
     let panPointerStart = { x: 0, y: 0 };
     let panStart = { x: 0, y: 0 };
+    let middleButtonPressed = false;
 
     canvas.addEventListener('pointerdown', event => {
+        if (event.button === 1) {
+            middleButtonPressed = true;
+        }
         const rect = canvas.getBoundingClientRect();
         const { x, y } = canvasToMm(event.clientX - rect.left, event.clientY - rect.top);
 
@@ -1412,6 +1416,9 @@
     });
 
     canvas.addEventListener('pointerup', event => {
+        if (event.button === 1) {
+            middleButtonPressed = false;
+        }
         if (canvas.hasPointerCapture(event.pointerId)) {
             canvas.releasePointerCapture(event.pointerId);
         }
@@ -1437,6 +1444,7 @@
     });
 
     canvas.addEventListener('pointercancel', event => {
+        middleButtonPressed = false;
         if (canvas.hasPointerCapture(event.pointerId)) {
             canvas.releasePointerCapture(event.pointerId);
         }
@@ -1462,8 +1470,13 @@
     });
 
     canvas.addEventListener('wheel', event => {
+        const isZooming = event.ctrlKey || event.metaKey;
+        const isPanning = !isZooming && (event.shiftKey || middleButtonPressed);
+        if (!isZooming && !isPanning) {
+            return;
+        }
         event.preventDefault();
-        if (event.ctrlKey || event.metaKey) {
+        if (isZooming) {
             const rect = canvas.getBoundingClientRect();
             const focus = {
                 x: event.clientX - rect.left,
