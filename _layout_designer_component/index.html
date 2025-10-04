@@ -1530,7 +1530,17 @@
         const localY = -sin * dx + cos * dy;
         if (piece.kind === 'curve' && piece.radius) {
             const dist = Math.sqrt(dx * dx + dy * dy);
-            return Math.abs(dist - piece.radius) < 60;
+            if (Math.abs(dist - piece.radius) >= 60) {
+                return false;
+            }
+            if (!piece.angle) {
+                return true;
+            }
+            const pointerAngle = normalizeRadians(Math.atan2(dy, dx) - rotation);
+            const orientation = placement.flipped ? -1 : 1;
+            const adjustedAngle = normalizeRadians(pointerAngle * orientation);
+            const halfSweep = toRadians(piece.angle) / 2;
+            return adjustedAngle >= -halfSweep && adjustedAngle <= halfSweep;
         }
         const length = piece.displayLength || piece.length || 0;
         return Math.abs(localX) <= length / 2 && Math.abs(localY) <= 50;
