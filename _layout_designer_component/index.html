@@ -471,6 +471,12 @@
             return;
         }
         container.innerHTML = markup;
+        requestFrameHeight();
+        container.querySelectorAll('.library-section').forEach(section => {
+            section.addEventListener('toggle', () => {
+                requestAnimationFrame(() => requestFrameHeight());
+            });
+        });
         container.querySelectorAll('.add-piece').forEach(button => {
             button.addEventListener('click', event => {
                 const code = event.currentTarget.getAttribute('data-code');
