@@ -219,19 +219,23 @@ def _designer(
         placements=placements,
         zoom=current_zoom,
     )
+    state_changed = False
+
     if component_value is None:
-        return placements, current_zoom
+        return placements, current_zoom, state_changed
 
     if not isinstance(component_value, str):
-        return placements, current_zoom
+        return placements, current_zoom, state_changed
 
     try:
         parsed = json.loads(component_value)
     except json.JSONDecodeError:
-        return placements, current_zoom
+        return placements, current_zoom, state_changed
 
     if not isinstance(parsed, dict):
-        return placements, current_zoom
+        return placements, current_zoom, state_changed
+
+    state_changed = True
 
     board_state = parsed.get("board")
     if isinstance(board_state, dict):
@@ -249,7 +253,7 @@ def _designer(
     if isinstance(payload, list):
         updated = [p for p in payload if isinstance(p, dict)]
 
-    return updated, current_zoom
+    return updated, current_zoom, state_changed
 
 
 
@@ -314,9 +318,11 @@ if uploaded_layout is not None:
 
 placements: List[Dict[str, object]] = st.session_state["placements"]
 current_zoom: float = float(st.session_state.get("zoom", 1.0))
-placements, current_zoom = _designer(board, placements, current_zoom)
+placements, current_zoom, state_changed = _designer(board, placements, current_zoom)
 st.session_state["placements"] = placements
 st.session_state["zoom"] = current_zoom
+if state_changed:
+    st.rerun()
 
 layout_payload = {
     "placements": placements,
