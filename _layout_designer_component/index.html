@@ -341,8 +341,8 @@
     </style>
     <div class="designer-wrapper">
         <aside class="library-panel">
-            <h3>Track library and curve guides</h3>
-            <p class="hint">Click "Add to board" to drop a piece. Curved pieces also offer a planning circle that appears below the board for further adjustments.</p>
+            <h3>Track library</h3>
+            <p class="hint">Click "Add to board" to drop a piece onto the layout.</p>
             <div class="library-sections" id="librarySections"></div>
         </aside>
         <div class="board-column">
@@ -382,11 +382,6 @@
                     <p class="hint">Download a JSON backup of the current plan.</p>
                 </div>
             </div>
-            <div class="planning-panel">
-                <h4>Planning circles</h4>
-                <p class="hint">Planning circles help you visualise radius clearances. Drag a circle onto the board to position it, or select one below to rename or remove it.</p>
-                <div id="circleList" class="circle-list"></div>
-            </div>
         </div>
     </div>
     <script src="https://unpkg.com/streamlit-component-lib/dist/index.js"></script>
@@ -397,7 +392,6 @@
     let placements = [];
     let guideCircles = [];
     let nextId = 0;
-    let circleCounter = 0;
     let selectedId = null;
     let selectedCircleId = null;
     let boardOrientation = 0;
@@ -512,16 +506,12 @@
                 const radiusFragment = radius ? ` · Radius ${radius.toFixed(0)} mm` : '';
                 const kindLabel = item.kind ? String(item.kind).charAt(0).toUpperCase() + String(item.kind).slice(1) : '';
                 const lengthValue = item.displayLength ?? item.length ?? 0;
-                const extraControls = (item.kind === 'curve' && radius)
-                    ? `<button data-radius="${radius}" data-label="${item.code} (${radius.toFixed(0)} mm)" class="add-circle">Add guide circle</button>`
-                    : '';
                 return (
                     `<div class="library-item">` +
                     `<div class="library-heading"><strong>${item.code}</strong><span>${item.name || ''}</span></div>` +
                     `<small>${kindLabel} · ${Number(lengthValue).toFixed(0)} mm${radiusFragment}</small>` +
                     `<div class="library-actions">` +
                     `<button data-code="${item.code}" class="add-piece">Add to board</button>` +
-                    `${extraControls}` +
                     `</div>` +
                     `</div>`
                 );
@@ -564,28 +554,6 @@
                 if (code) {
                     addPiece(code);
                 }
-            });
-        });
-        container.querySelectorAll('.add-circle').forEach(button => {
-            button.addEventListener('click', event => {
-                const radius = parseFloat(event.currentTarget.getAttribute('data-radius'));
-                if (!Number.isFinite(radius) || radius <= 0) { return; }
-                const label = event.currentTarget.getAttribute('data-label') || `Radius ${radius.toFixed(0)} mm`;
-                const newCircle = {
-                    id: 'circle-' + (circleCounter++),
-                    radius,
-                    x: boardCenter.x,
-                    y: boardCenter.y,
-                    color: nextCircleColour(),
-                    label,
-                };
-                guideCircles.push(newCircle);
-                selectedCircleId = newCircle.id;
-                selectedId = null;
-                updateSelectionLabel();
-                renderCircleList();
-                draw();
-                emitState();
             });
         });
     }
@@ -678,7 +646,6 @@
     }
 
     guideCircles = buildGuideCircleList(guideCircles);
-    circleCounter = guideCircles.length;
     selectedCircleId = guideCircles.length ? guideCircles[guideCircles.length - 1].id : null;
     let draggingCircleId = null;
     let circleDragOffset = { x: 0, y: 0 };
@@ -957,7 +924,6 @@
     function draw() {
         ctx.clearRect(0, 0, canvas.width, canvas.height);
         drawBoard();
-        drawGuideCircles();
         drawPlacements();
     }
 
@@ -1193,14 +1159,6 @@
                 rotation: item.rotation,
                 flipped: item.flipped,
             })),
-            circles: guideCircles.map(circle => ({
-                id: circle.id,
-                radius: circle.radius,
-                x: circle.x,
-                y: circle.y,
-                color: circle.color,
-                label: circle.label,
-            })),
             board: {
                 description: boardData.description,
                 polygon: polygon.map(pt => pt.slice()),
@@ -1216,12 +1174,6 @@
 
     function getCircleById(id) {
         return guideCircles.find(circle => circle.id === id) || null;
-    }
-
-    function nextCircleColour() {
-        const colour = colorPalette[nextCircleColor % colorPalette.length];
-        nextCircleColor += 1;
-        return colour;
     }
 
     function currentFrameHeight() {
@@ -1291,7 +1243,8 @@
     function applyRenderArgs(args) {
         if (!args || typeof args !== 'object') { return; }
         const previousSelectedId = selectedId;
-        const previousSelectedCircleId = selectedCircleId;
+        selectedCircleId = null;
+        guideCircles = [];
         if (Array.isArray(args.library)) {
             trackLibrary = args.library;
         }
@@ -1313,31 +1266,18 @@
             }));
             nextId = placements.length;
         }
-        if (Array.isArray(args.circles)) {
-            guideCircles = buildGuideCircleList(args.circles);
-            circleCounter = guideCircles.length;
-        }
         if (typeof args.zoom === 'number') {
             zoom = Math.min(Math.max(args.zoom, MIN_ZOOM), MAX_ZOOM);
             updateZoomUI();
         }
         let resolvedSelectedId = null;
-        let resolvedSelectedCircleId = null;
         if (previousSelectedId && placements.some(item => item.id === previousSelectedId)) {
             resolvedSelectedId = previousSelectedId;
         }
-        if (previousSelectedCircleId && guideCircles.some(circle => circle.id === previousSelectedCircleId)) {
-            resolvedSelectedCircleId = previousSelectedCircleId;
-        }
-        if (!resolvedSelectedId && !resolvedSelectedCircleId) {
-            if (placements.length) {
-                resolvedSelectedId = placements[placements.length - 1].id;
-            } else if (guideCircles.length) {
-                resolvedSelectedCircleId = guideCircles[guideCircles.length - 1].id;
-            }
+        if (!resolvedSelectedId && placements.length) {
+            resolvedSelectedId = placements[placements.length - 1].id;
         }
         selectedId = resolvedSelectedId;
-        selectedCircleId = resolvedSelectedCircleId;
         clampPan();
         draw();
         updateBoardOrientationLabel();
