@@ -1149,8 +1149,11 @@
         emitState();
     }
 
-    function emitState() {
-        const payload = {
+    let emitScheduled = false;
+    let lastEmittedJson = null;
+
+    function buildStatePayload() {
+        return {
             placements: placements.map(item => ({
                 id: item.id,
                 code: item.code,
@@ -1166,10 +1169,34 @@
             },
             zoom,
         };
+    }
+
+    function flushStatePayload() {
+        const payload = buildStatePayload();
+        const jsonValue = JSON.stringify(payload);
+        if (jsonValue === lastEmittedJson) {
+            return payload;
+        }
+        lastEmittedJson = jsonValue;
         postToStreamlit("streamlit:setComponentValue", {
-            value: JSON.stringify(payload),
+            value: jsonValue,
         });
         return payload;
+    }
+
+    function emitState(options = {}) {
+        const { immediate = false } = options;
+        if (immediate) {
+            return flushStatePayload();
+        }
+        if (!emitScheduled) {
+            emitScheduled = true;
+            requestAnimationFrame(() => {
+                emitScheduled = false;
+                flushStatePayload();
+            });
+        }
+        return buildStatePayload();
     }
 
     function getCircleById(id) {
@@ -1709,7 +1736,7 @@
     const saveLayoutButton = document.getElementById('saveLayout');
     if (saveLayoutButton) {
         saveLayoutButton.addEventListener('click', () => {
-            const payload = emitState();
+            const payload = emitState({ immediate: true });
             const jsonText = JSON.stringify(payload, null, 2);
             const blob = new Blob([jsonText], { type: 'application/json' });
             const url = URL.createObjectURL(blob);
