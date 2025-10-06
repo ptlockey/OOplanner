@@ -38,15 +38,13 @@ st.write(
 
 def _normalise_layout_payload(
     data: object,
-) -> Tuple[List[Dict[str, object]], List[Dict[str, object]], Optional[float]]:
-    """Extract placements, planning circles and optional zoom from payload."""
+) -> Tuple[List[Dict[str, object]], Optional[float]]:
+    """Extract placements and optional zoom from payload."""
 
     placements_payload: object
-    circles_payload: object = []
     zoom_value: Optional[float] = None
     if isinstance(data, dict):
         placements_payload = data.get("placements")
-        circles_payload = data.get("circles")
         zoom_raw = data.get("zoom")
         if isinstance(zoom_raw, (int, float)):
             zoom_value = float(zoom_raw)
@@ -98,34 +96,7 @@ def _normalise_layout_payload(
     if saw_item and not normalised:
         raise ValueError("No valid placements were found in the layout JSON.")
 
-    circles: List[Dict[str, object]] = []
-    if isinstance(circles_payload, list):
-        for idx, raw_circle in enumerate(circles_payload):
-            if not isinstance(raw_circle, dict):
-                continue
-            circle_id = raw_circle.get("id")
-            if not isinstance(circle_id, str) or not circle_id:
-                circle_id = f"circle-{idx}"
-            radius = _to_float(raw_circle.get("radius"), 0.0)
-            if radius <= 0:
-                continue
-            x_val = _to_float(raw_circle.get("x"), 0.0)
-            y_val = _to_float(raw_circle.get("y"), 0.0)
-            color_val = raw_circle.get("color")
-            label_val = raw_circle.get("label")
-            circle: Dict[str, object] = {
-                "id": circle_id,
-                "radius": radius,
-                "x": x_val,
-                "y": y_val,
-            }
-            if isinstance(color_val, str) and color_val:
-                circle["color"] = color_val
-            if isinstance(label_val, str) and label_val:
-                circle["label"] = label_val
-            circles.append(circle)
-
-    return normalised, circles, zoom_value
+    return normalised, zoom_value
 
 
 def _board_controls(container) -> BoardSpecification:
@@ -211,9 +182,8 @@ def _board_controls(container) -> BoardSpecification:
 def _designer(
     board: BoardSpecification,
     placements: List[Dict[str, object]],
-    circles: List[Dict[str, object]],
     initial_zoom: float,
-) -> Tuple[List[Dict[str, object]], List[Dict[str, object]], float]:
+) -> Tuple[List[Dict[str, object]], float]:
     library = hornby_track_library()
     board_polygon = board.polygon_points()
     min_zoom = 0.4
@@ -247,22 +217,21 @@ def _designer(
         board=board_payload,
         library=track_payload,
         placements=placements,
-        circles=circles,
         zoom=current_zoom,
     )
     if component_value is None:
-        return placements, circles, current_zoom
+        return placements, current_zoom
 
     if not isinstance(component_value, str):
-        return placements, circles, current_zoom
+        return placements, current_zoom
 
     try:
         parsed = json.loads(component_value)
     except json.JSONDecodeError:
-        return placements, circles, current_zoom
+        return placements, current_zoom
 
     if not isinstance(parsed, dict):
-        return placements, circles, current_zoom
+        return placements, current_zoom
 
     board_state = parsed.get("board")
     if isinstance(board_state, dict):
@@ -272,7 +241,6 @@ def _designer(
 
     payload = parsed.get("placements")
     zoom_value = parsed.get("zoom")
-    circles_payload = parsed.get("circles")
 
     if isinstance(zoom_value, (int, float)):
         current_zoom = max(min(float(zoom_value), max_zoom), min_zoom)
@@ -281,11 +249,7 @@ def _designer(
     if isinstance(payload, list):
         updated = [p for p in payload if isinstance(p, dict)]
 
-    updated_circles = circles
-    if isinstance(circles_payload, list):
-        updated_circles = [c for c in circles_payload if isinstance(c, dict)]
-
-    return updated, updated_circles, current_zoom
+    return updated, current_zoom
 
 
 
@@ -324,9 +288,6 @@ if "placements" not in st.session_state:
 if "zoom" not in st.session_state:
     st.session_state["zoom"] = 1.0
 
-if "circles" not in st.session_state:
-    st.session_state["circles"] = []
-
 if "board_orientation" not in st.session_state:
     st.session_state["board_orientation"] = 0.0
 
@@ -334,14 +295,13 @@ if uploaded_layout is not None:
     try:
         raw_text = uploaded_layout.getvalue().decode("utf-8")
         parsed_payload = json.loads(raw_text)
-        loaded_placements, loaded_circles, loaded_zoom = _normalise_layout_payload(parsed_payload)
+        loaded_placements, loaded_zoom = _normalise_layout_payload(parsed_payload)
     except UnicodeDecodeError:
         planning_column.error("Could not decode the uploaded file. Please upload UTF-8 JSON.")
     except (json.JSONDecodeError, ValueError) as exc:
         planning_column.error(f"Unable to load layout: {exc}")
     else:
         st.session_state["placements"] = loaded_placements
-        st.session_state["circles"] = loaded_circles
         if loaded_zoom is not None:
             st.session_state["zoom"] = loaded_zoom
         if isinstance(parsed_payload, dict):
@@ -353,16 +313,13 @@ if uploaded_layout is not None:
         planning_column.success(f"Loaded {len(loaded_placements)} placement{'s' if len(loaded_placements) != 1 else ''} from layout.")
 
 placements: List[Dict[str, object]] = st.session_state["placements"]
-circles: List[Dict[str, object]] = st.session_state.get("circles", [])
 current_zoom: float = float(st.session_state.get("zoom", 1.0))
-placements, circles, current_zoom = _designer(board, placements, circles, current_zoom)
+placements, current_zoom = _designer(board, placements, current_zoom)
 st.session_state["placements"] = placements
-st.session_state["circles"] = circles
 st.session_state["zoom"] = current_zoom
 
 layout_payload = {
     "placements": placements,
-    "circles": circles,
     "board": {
         "description": describe_board(board),
         "polygon": board.polygon_points(),
