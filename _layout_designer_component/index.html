@@ -1290,6 +1290,8 @@
 
     function applyRenderArgs(args) {
         if (!args || typeof args !== 'object') { return; }
+        const previousSelectedId = selectedId;
+        const previousSelectedCircleId = selectedCircleId;
         if (Array.isArray(args.library)) {
             trackLibrary = args.library;
         }
@@ -1314,13 +1316,28 @@
         if (Array.isArray(args.circles)) {
             guideCircles = buildGuideCircleList(args.circles);
             circleCounter = guideCircles.length;
-            selectedCircleId = guideCircles.length ? guideCircles[guideCircles.length - 1].id : null;
         }
         if (typeof args.zoom === 'number') {
             zoom = Math.min(Math.max(args.zoom, MIN_ZOOM), MAX_ZOOM);
             updateZoomUI();
         }
-        selectedId = placements.length ? placements[placements.length - 1].id : null;
+        let resolvedSelectedId = null;
+        let resolvedSelectedCircleId = null;
+        if (previousSelectedId && placements.some(item => item.id === previousSelectedId)) {
+            resolvedSelectedId = previousSelectedId;
+        }
+        if (previousSelectedCircleId && guideCircles.some(circle => circle.id === previousSelectedCircleId)) {
+            resolvedSelectedCircleId = previousSelectedCircleId;
+        }
+        if (!resolvedSelectedId && !resolvedSelectedCircleId) {
+            if (placements.length) {
+                resolvedSelectedId = placements[placements.length - 1].id;
+            } else if (guideCircles.length) {
+                resolvedSelectedCircleId = guideCircles[guideCircles.length - 1].id;
+            }
+        }
+        selectedId = resolvedSelectedId;
+        selectedCircleId = resolvedSelectedCircleId;
         clampPan();
         draw();
         updateBoardOrientationLabel();
