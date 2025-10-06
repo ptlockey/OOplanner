@@ -17,9 +17,9 @@
     }
     .designer-wrapper {
         display: grid;
-        grid-template-columns: minmax(0, 2.2fr) minmax(280px, 1fr);
+        grid-template-columns: minmax(260px, 1fr) minmax(0, 3fr);
         gap: 1.25rem;
-        align-items: stretch;
+        align-items: start;
         width: 100%;
         max-width: 1480px;
         flex: 1 1 auto;
@@ -145,9 +145,10 @@
         flex-direction: column;
         gap: 0.75rem;
         position: sticky;
-        top: 0;
-        max-height: 100%;
+        top: 1.5rem;
+        max-height: calc(100vh - 3rem);
         overflow: auto;
+        align-self: start;
     }
     .library-panel h3 {
         margin: 0;
@@ -259,10 +260,31 @@
         flex-direction: column;
         gap: 0.5rem;
     }
+    .planning-panel {
+        margin-top: 1rem;
+        border: 1px solid #d0d0d0;
+        border-radius: 0.75rem;
+        background: #ffffff;
+        padding: 1rem 1.2rem;
+        display: flex;
+        flex-direction: column;
+        gap: 0.75rem;
+        box-shadow: 0 10px 28px rgba(31, 55, 90, 0.12);
+    }
+    .planning-panel h4 {
+        margin: 0;
+        font-size: 1.05rem;
+        color: #2f3b52;
+    }
     .circle-list {
         display: flex;
         flex-direction: column;
         gap: 0.4rem;
+    }
+    .planning-panel .circle-list {
+        max-height: 320px;
+        overflow: auto;
+        padding-right: 0.25rem;
     }
     .circle-item {
         display: flex;
@@ -318,6 +340,11 @@
     }
     </style>
     <div class="designer-wrapper">
+        <aside class="library-panel">
+            <h3>Track library and curve guides</h3>
+            <p class="hint">Click "Add to board" to drop a piece. Curved pieces also offer a planning circle that appears below the board for further adjustments.</p>
+            <div class="library-sections" id="librarySections"></div>
+        </aside>
         <div class="board-column">
             <div class="board-canvas">
                 <div class="board-surface">
@@ -355,16 +382,12 @@
                     <p class="hint">Download a JSON backup of the current plan.</p>
                 </div>
             </div>
-        </div>
-        <aside class="library-panel">
-            <h3>Track library and curve guides</h3>
-            <p class="hint">Click "Add to board" to drop a piece. Curved pieces also offer a planning circle that you can drag on the board.</p>
-            <div class="library-sections" id="librarySections"></div>
-            <div class="circle-panel">
+            <div class="planning-panel">
                 <h4>Planning circles</h4>
+                <p class="hint">Planning circles help you visualise radius clearances. Drag a circle onto the board to position it, or select one below to rename or remove it.</p>
                 <div id="circleList" class="circle-list"></div>
             </div>
-        </aside>
+        </div>
     </div>
     <script src="https://unpkg.com/streamlit-component-lib/dist/index.js"></script>
     <script>
@@ -738,12 +761,31 @@
 
     function clampPan() {
         const scale = getScale();
-        const contentWidth = widthMm * scale + padding * 2;
-        const contentHeight = heightMm * scale + padding * 2;
-        const maxPanX = Math.max(contentWidth, canvas.width);
-        const maxPanY = Math.max(contentHeight, canvas.height);
-        pan.x = Math.min(Math.max(pan.x, -maxPanX), maxPanX);
-        pan.y = Math.min(Math.max(pan.y, -maxPanY), maxPanY);
+        if (!Number.isFinite(scale) || scale <= 0 || !canvas.width || !canvas.height) {
+            pan.x = 0;
+            pan.y = 0;
+            return;
+        }
+        const boardWidth = Math.max(widthMm * scale, 0);
+        const boardHeight = Math.max(heightMm * scale, 0);
+        const marginX = Math.min(canvas.width * 0.35, 180);
+        const marginY = Math.min(canvas.height * 0.35, 180);
+        const minPanX = marginX - padding - boardWidth;
+        const maxPanX = canvas.width - marginX - padding;
+        if (minPanX <= maxPanX) {
+            pan.x = Math.min(Math.max(pan.x, minPanX), maxPanX);
+        } else {
+            pan.x = (minPanX + maxPanX) / 2;
+        }
+        const bottomBase = canvas.height - padding;
+        const topBase = bottomBase - boardHeight;
+        const minPanY = marginY - bottomBase;
+        const maxPanY = canvas.height - marginY - topBase;
+        if (minPanY <= maxPanY) {
+            pan.y = Math.min(Math.max(pan.y, minPanY), maxPanY);
+        } else {
+            pan.y = (minPanY + maxPanY) / 2;
+        }
     }
 
     function updateZoomUI() {

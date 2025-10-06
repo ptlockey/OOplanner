@@ -128,17 +128,17 @@ def _normalise_layout_payload(
     return normalised, circles, zoom_value
 
 
-def _board_controls() -> BoardSpecification:
-    st.sidebar.header("Board outline")
-    shape = st.sidebar.selectbox(
+def _board_controls(container) -> BoardSpecification:
+    container.header("Board outline")
+    shape = container.selectbox(
         "Board shape",
         ["Rectangle", "L-Shape", "Custom polygon"],
         index=0,
     )
 
     if shape == "Rectangle":
-        width = st.sidebar.number_input("Width (mm)", min_value=600.0, value=1800.0, step=50.0)
-        height = st.sidebar.number_input("Depth (mm)", min_value=450.0, value=1200.0, step=50.0)
+        width = container.number_input("Width (mm)", min_value=600.0, value=1800.0, step=50.0)
+        height = container.number_input("Depth (mm)", min_value=450.0, value=1200.0, step=50.0)
         polygon = [
             (0.0, 0.0),
             (width, 0.0),
@@ -148,9 +148,9 @@ def _board_controls() -> BoardSpecification:
         return BoardSpecification(shape="rectangle", width=width, height=height, polygon=polygon)
 
     if shape == "L-Shape":
-        long_leg = st.sidebar.number_input("Long leg length (mm)", min_value=1000.0, value=2400.0, step=50.0)
-        short_leg = st.sidebar.number_input("Short leg length (mm)", min_value=800.0, value=1500.0, step=50.0)
-        shelf_width = st.sidebar.number_input("Shelf width (mm)", min_value=450.0, value=900.0, step=25.0)
+        long_leg = container.number_input("Long leg length (mm)", min_value=1000.0, value=2400.0, step=50.0)
+        short_leg = container.number_input("Short leg length (mm)", min_value=800.0, value=1500.0, step=50.0)
+        shelf_width = container.number_input("Shelf width (mm)", min_value=450.0, value=900.0, step=25.0)
         polygon = [
             (0.0, 0.0),
             (long_leg, 0.0),
@@ -166,7 +166,7 @@ def _board_controls() -> BoardSpecification:
             polygon=polygon,
         )
 
-    st.sidebar.markdown(
+    container.markdown(
         "Enter the corner points of your board outline in millimetres. "
         "Provide one point per line in the format `x,y`."
     )
@@ -177,7 +177,7 @@ def _board_controls() -> BoardSpecification:
         (0.0, 1200.0),
     ]
     default_text = "\n".join(f"{x:.0f},{y:.0f}" for x, y in default_points)
-    polygon_text = st.sidebar.text_area(
+    polygon_text = container.text_area(
         "Corner points",
         value=default_text,
         key="custom_polygon",
@@ -200,7 +200,7 @@ def _board_controls() -> BoardSpecification:
             continue
         polygon.append((x_val, y_val))
     if invalid_lines:
-        st.sidebar.warning(
+        container.warning(
             f"Skipped {invalid_lines} line{'s' if invalid_lines != 1 else ''} with invalid coordinates."
         )
     width = max((p[0] for p in polygon), default=0.0)
@@ -291,24 +291,32 @@ def _designer(
 
 
 
-board = _board_controls()
-st.sidebar.success(describe_board(board))
+controls_column, planning_column = st.columns([3, 2])
 
-st.sidebar.header("Power planning")
-supply_voltage = st.sidebar.number_input(
+board = _board_controls(controls_column)
+controls_column.success(describe_board(board))
+
+planning_column.header("Power planning")
+supply_voltage = planning_column.number_input(
     "DCC supply voltage (V)",
     min_value=10.0,
     max_value=22.0,
     value=16.0,
     step=0.5,
 )
-expected_current = st.sidebar.number_input(
+expected_current = planning_column.number_input(
     "Expected simultaneous load (A)",
     min_value=0.1,
     max_value=5.0,
     value=1.5,
     step=0.1,
 )
+
+planning_column.subheader("Layout data")
+uploaded_layout = planning_column.file_uploader("Load layout JSON", type=["json"])
+
+download_placeholder = planning_column.empty()
+
 
 if "placements" not in st.session_state:
     st.session_state["placements"] = []
@@ -322,16 +330,15 @@ if "circles" not in st.session_state:
 if "board_orientation" not in st.session_state:
     st.session_state["board_orientation"] = 0.0
 
-uploaded_layout = st.sidebar.file_uploader("Load layout JSON", type=["json"])
 if uploaded_layout is not None:
     try:
         raw_text = uploaded_layout.getvalue().decode("utf-8")
         parsed_payload = json.loads(raw_text)
         loaded_placements, loaded_circles, loaded_zoom = _normalise_layout_payload(parsed_payload)
     except UnicodeDecodeError:
-        st.sidebar.error("Could not decode the uploaded file. Please upload UTF-8 JSON.")
+        planning_column.error("Could not decode the uploaded file. Please upload UTF-8 JSON.")
     except (json.JSONDecodeError, ValueError) as exc:
-        st.sidebar.error(f"Unable to load layout: {exc}")
+        planning_column.error(f"Unable to load layout: {exc}")
     else:
         st.session_state["placements"] = loaded_placements
         st.session_state["circles"] = loaded_circles
@@ -343,7 +350,7 @@ if uploaded_layout is not None:
                 orientation_value = board_payload.get("orientation")
                 if isinstance(orientation_value, (int, float)):
                     st.session_state["board_orientation"] = float(orientation_value)
-        st.sidebar.success(f"Loaded {len(loaded_placements)} placement{'s' if len(loaded_placements) != 1 else ''} from layout.")
+        planning_column.success(f"Loaded {len(loaded_placements)} placement{'s' if len(loaded_placements) != 1 else ''} from layout.")
 
 placements: List[Dict[str, object]] = st.session_state["placements"]
 circles: List[Dict[str, object]] = st.session_state.get("circles", [])
@@ -363,7 +370,7 @@ layout_payload = {
     },
     "zoom": current_zoom,
 }
-st.sidebar.download_button(
+download_placeholder.download_button(
     "Download layout JSON",
     data=json.dumps(layout_payload, indent=2),
     file_name="layout.json",
