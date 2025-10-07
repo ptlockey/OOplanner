@@ -28,6 +28,16 @@ _layout_designer_component = components.declare_component(
 
 
 st.set_page_config(page_title="Hornby OO Layout Planner", layout="wide")
+st.markdown(
+    """
+    <style>
+    [data-testid="stStatusWidget"] {
+        display: none !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 st.title("Hornby OO Gauge Layout Planner")
 st.write(
     """Lay out your own Hornby OO gauge plan directly on the baseboard outline.\n"

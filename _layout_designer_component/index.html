@@ -649,7 +649,11 @@
     selectedCircleId = guideCircles.length ? guideCircles[guideCircles.length - 1].id : null;
     let draggingCircleId = null;
     let circleDragOffset = { x: 0, y: 0 };
-    const SNAP_DISTANCE_MM = 200;
+    // Allow snapping to consider every piece on the board. Previously this was limited to
+    // a small radius which meant the "Snap to piece" action did nothing unless the pieces
+    // were already close together. Lifting the radius ensures we always snap to the best
+    // available connection when the user explicitly requests it.
+    const SNAP_DISTANCE_MM = Number.POSITIVE_INFINITY;
     const CONNECTION_TOLERANCE_MM = 3;
     const ANGLE_TOLERANCE_RAD = Math.PI / 36;
 
