@@ -1168,6 +1168,10 @@
                 orientation: boardOrientation,
             },
             zoom,
+            pan: {
+                x: Number.isFinite(pan.x) ? pan.x : 0,
+                y: Number.isFinite(pan.y) ? pan.y : 0,
+            },
         };
     }
 
@@ -1296,6 +1300,14 @@
         if (typeof args.zoom === 'number') {
             zoom = Math.min(Math.max(args.zoom, MIN_ZOOM), MAX_ZOOM);
             updateZoomUI();
+        }
+        if (args.pan && typeof args.pan === 'object') {
+            const panX = Number(args.pan.x);
+            const panY = Number(args.pan.y);
+            if (Number.isFinite(panX) && Number.isFinite(panY)) {
+                pan.x = panX;
+                pan.y = panY;
+            }
         }
         let resolvedSelectedId = null;
         if (previousSelectedId && placements.some(item => item.id === previousSelectedId)) {
@@ -1545,6 +1557,7 @@
             pan.y -= event.deltaY;
             clampPan();
             draw();
+            emitState();
         }
     }, { passive: false });
 

@@ -38,16 +38,23 @@ st.write(
 
 def _normalise_layout_payload(
     data: object,
-) -> Tuple[List[Dict[str, object]], Optional[float]]:
-    """Extract placements and optional zoom from payload."""
+) -> Tuple[List[Dict[str, object]], Optional[float], Optional[Tuple[float, float]]]:
+    """Extract placements and optional viewport data from payload."""
 
     placements_payload: object
     zoom_value: Optional[float] = None
+    pan_value: Optional[Tuple[float, float]] = None
     if isinstance(data, dict):
         placements_payload = data.get("placements")
         zoom_raw = data.get("zoom")
         if isinstance(zoom_raw, (int, float)):
             zoom_value = float(zoom_raw)
+        pan_raw = data.get("pan")
+        if isinstance(pan_raw, dict):
+            pan_x = pan_raw.get("x")
+            pan_y = pan_raw.get("y")
+            if isinstance(pan_x, (int, float)) and isinstance(pan_y, (int, float)):
+                pan_value = (float(pan_x), float(pan_y))
     else:
         placements_payload = data
 
@@ -96,7 +103,7 @@ def _normalise_layout_payload(
     if saw_item and not normalised:
         raise ValueError("No valid placements were found in the layout JSON.")
 
-    return normalised, zoom_value
+    return normalised, zoom_value, pan_value
 
 
 def _board_controls(container) -> BoardSpecification:
@@ -183,7 +190,8 @@ def _designer(
     board: BoardSpecification,
     placements: List[Dict[str, object]],
     initial_zoom: float,
-) -> Tuple[List[Dict[str, object]], float]:
+    initial_pan: Tuple[float, float],
+) -> Tuple[List[Dict[str, object]], float, Tuple[float, float]]:
     library = hornby_track_library()
     board_polygon = board.polygon_points()
     min_zoom = 0.4
@@ -193,6 +201,13 @@ def _designer(
     except (TypeError, ValueError):
         initial_zoom_value = 1.0
     current_zoom = max(min(initial_zoom_value, max_zoom), min_zoom)
+    try:
+        pan_x = float(initial_pan[0])
+        pan_y = float(initial_pan[1])
+    except (TypeError, ValueError, IndexError):
+        pan_x = 0.0
+        pan_y = 0.0
+    current_pan = (pan_x, pan_y)
     board_payload = {
         "polygon": board_polygon,
         "description": describe_board(board),
@@ -218,22 +233,23 @@ def _designer(
         library=track_payload,
         placements=placements,
         zoom=current_zoom,
+        pan={"x": pan_x, "y": pan_y},
     )
     state_changed = False
 
     if component_value is None:
-        return placements, current_zoom, state_changed
+        return placements, current_zoom, current_pan, state_changed
 
     if not isinstance(component_value, str):
-        return placements, current_zoom, state_changed
+        return placements, current_zoom, current_pan, state_changed
 
     try:
         parsed = json.loads(component_value)
     except json.JSONDecodeError:
-        return placements, current_zoom, state_changed
+        return placements, current_zoom, current_pan, state_changed
 
     if not isinstance(parsed, dict):
-        return placements, current_zoom, state_changed
+        return placements, current_zoom, current_pan, state_changed
 
     state_changed = True
 
@@ -245,6 +261,7 @@ def _designer(
 
     payload = parsed.get("placements")
     zoom_value = parsed.get("zoom")
+    pan_value = parsed.get("pan")
 
     if isinstance(zoom_value, (int, float)):
         current_zoom = max(min(float(zoom_value), max_zoom), min_zoom)
@@ -253,7 +270,13 @@ def _designer(
     if isinstance(payload, list):
         updated = [p for p in payload if isinstance(p, dict)]
 
-    return updated, current_zoom, state_changed
+    if isinstance(pan_value, dict):
+        pan_x_value = pan_value.get("x")
+        pan_y_value = pan_value.get("y")
+        if isinstance(pan_x_value, (int, float)) and isinstance(pan_y_value, (int, float)):
+            current_pan = (float(pan_x_value), float(pan_y_value))
+
+    return updated, current_zoom, current_pan, state_changed
 
 
 
@@ -295,11 +318,14 @@ if "zoom" not in st.session_state:
 if "board_orientation" not in st.session_state:
     st.session_state["board_orientation"] = 0.0
 
+if "pan" not in st.session_state:
+    st.session_state["pan"] = (0.0, 0.0)
+
 if uploaded_layout is not None:
     try:
         raw_text = uploaded_layout.getvalue().decode("utf-8")
         parsed_payload = json.loads(raw_text)
-        loaded_placements, loaded_zoom = _normalise_layout_payload(parsed_payload)
+        loaded_placements, loaded_zoom, loaded_pan = _normalise_layout_payload(parsed_payload)
     except UnicodeDecodeError:
         planning_column.error("Could not decode the uploaded file. Please upload UTF-8 JSON.")
     except (json.JSONDecodeError, ValueError) as exc:
@@ -308,6 +334,8 @@ if uploaded_layout is not None:
         st.session_state["placements"] = loaded_placements
         if loaded_zoom is not None:
             st.session_state["zoom"] = loaded_zoom
+        if loaded_pan is not None:
+            st.session_state["pan"] = loaded_pan
         if isinstance(parsed_payload, dict):
             board_payload = parsed_payload.get("board")
             if isinstance(board_payload, dict):
@@ -318,9 +346,13 @@ if uploaded_layout is not None:
 
 placements: List[Dict[str, object]] = st.session_state["placements"]
 current_zoom: float = float(st.session_state.get("zoom", 1.0))
-placements, current_zoom, state_changed = _designer(board, placements, current_zoom)
+initial_pan: Tuple[float, float] = tuple(st.session_state.get("pan", (0.0, 0.0)))  # type: ignore[arg-type]
+placements, current_zoom, current_pan, state_changed = _designer(
+    board, placements, current_zoom, initial_pan
+)
 st.session_state["placements"] = placements
 st.session_state["zoom"] = current_zoom
+st.session_state["pan"] = current_pan
 if state_changed:
     st.rerun()
 
@@ -332,6 +364,7 @@ layout_payload = {
         "orientation": float(st.session_state.get("board_orientation", 0.0)),
     },
     "zoom": current_zoom,
+    "pan": {"x": float(current_pan[0]), "y": float(current_pan[1])},
 }
 download_placeholder.download_button(
     "Download layout JSON",
